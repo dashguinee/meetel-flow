@@ -1,0 +1,163 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Meetel Flow</title>
+    <link rel="stylesheet" href="./styles.css" />
+  </head>
+  <body>
+    <div class="resize-edge resize-n"></div>
+    <div class="resize-edge resize-s"></div>
+    <div class="resize-edge resize-w"></div>
+    <div class="resize-edge resize-e"></div>
+    <div id="wakeOverlay" class="wake-overlay"></div>
+
+    <main class="widget">
+      <div id="islandCapsule" class="island-capsule" style="display:none">
+        <svg class="island-mic" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z"/>
+          <path d="M19 10v2a7 7 0 0 1-14 0v-2"/>
+        </svg>
+        <span id="islandStatus" class="island-status">Ready</span>
+      </div>
+      <header class="top-bar">
+        <span class="logo">Meetel Flow</span>
+        <div class="top-bar-actions">
+          <button id="settingsToggle" class="icon-btn" title="Settings">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <circle cx="12" cy="12" r="3"/>
+              <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/>
+            </svg>
+          </button>
+          <button id="panelToggle" class="icon-btn panel-toggle-btn" title="Toggle side panel (long press for capsule)">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <rect x="3" y="3" width="7" height="18" rx="1"/>
+              <rect x="14" y="3" width="7" height="18" rx="1" opacity="0.3"/>
+            </svg>
+          </button>
+        </div>
+      </header>
+
+      <div class="mic-area">
+        <button id="micBtn" class="mic-btn" title="Toggle dictation (Ctrl+Space)">
+          <svg width="36" height="36" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z"/>
+            <path d="M19 10v2a7 7 0 0 1-14 0v-2"/>
+            <line x1="12" y1="19" x2="12" y2="23"/>
+            <line x1="8" y1="23" x2="16" y2="23"/>
+          </svg>
+        </button>
+        <p id="statusText" class="status-text">Starting...</p>
+      </div>
+
+      <div class="minutes-badge">
+        <span id="minutesBadge">-- min remaining</span>
+      </div>
+
+      <div id="transcriptList" class="transcript-list"></div>
+
+      <div id="settingsPanel" class="settings-panel">
+        <div class="settings-inner">
+          <label class="field">
+            <span class="field-label">Microphone</span>
+            <select id="micSelect">
+              <option value="">System Default</option>
+            </select>
+          </label>
+
+          <label class="field">
+            <span class="field-label">Language</span>
+            <select id="language">
+              <option value="auto">Auto (EN + FR)</option>
+              <option value="en">English</option>
+              <option value="fr">French</option>
+            </select>
+          </label>
+
+          <label class="field">
+            <span class="field-label">Insert Mode</span>
+            <select id="targetMode">
+              <option value="type">Type at cursor</option>
+              <option value="clipboard">Copy to clipboard</option>
+            </select>
+          </label>
+
+          <label class="field">
+            <span class="field-label">Meetel Account ID <span class="optional">(optional)</span></span>
+            <input id="userId" type="text" placeholder="MU-xxxxxxxx" autocomplete="off" />
+          </label>
+
+          <div class="field">
+            <span class="field-label">View Mode</span>
+            <div id="modeSelector" class="mode-selector">
+              <button class="mode-option selected" data-mode="panel">
+                <svg class="mode-icon" width="36" height="28" viewBox="0 0 36 28">
+                  <rect x="2" y="2" width="12" height="24" rx="2" fill="none" stroke="currentColor" stroke-width="1.5"/>
+                  <rect x="18" y="6" width="16" height="16" rx="1" fill="none" stroke="currentColor" stroke-width="1" opacity="0.3"/>
+                </svg>
+                <span class="mode-label">Side Panel</span>
+              </button>
+              <button class="mode-option" data-mode="compact">
+                <svg class="mode-icon" width="36" height="28" viewBox="0 0 36 28">
+                  <rect x="8" y="4" width="20" height="20" rx="4" fill="none" stroke="currentColor" stroke-width="1.5"/>
+                  <circle cx="18" cy="14" r="4" fill="none" stroke="currentColor" stroke-width="1.5"/>
+                </svg>
+                <span class="mode-label">Dynamic View</span>
+              </button>
+              <button class="mode-option" data-mode="island">
+                <svg class="mode-icon" width="36" height="28" viewBox="0 0 36 28">
+                  <rect x="2" y="9" width="32" height="10" rx="5" fill="none" stroke="currentColor" stroke-width="1.5"/>
+                  <circle cx="11" cy="14" r="3" fill="none" stroke="currentColor" stroke-width="1.5"/>
+                </svg>
+                <span class="mode-label">Capsule</span>
+              </button>
+            </div>
+          </div>
+
+          <div id="panelSideField" class="field">
+            <span class="field-label">Panel Side</span>
+            <div id="panelSideToggle" class="panel-side-toggle">
+              <button class="side-btn" data-side="left">Left</button>
+              <button class="side-btn selected" data-side="right">Right</button>
+            </div>
+          </div>
+
+          <button id="saveBtn" class="save-btn">Save</button>
+        </div>
+      </div>
+
+      <div class="footer">
+        <div class="shortcut-group">
+          <span class="shortcut-hint">Shift + Space</span>
+          <span class="shortcut-sub">To Flow Type</span>
+        </div>
+        <div class="footer-row">
+          <span class="footer-branding">Powered by <strong>DASH</strong></span>
+          <div class="footer-right">
+            <button id="openMeetelBtn" class="open-meetel-btn">Open in Meetel</button>
+            <span class="footer-brand">Meeting Intelligence</span>
+          </div>
+        </div>
+      </div>
+    </main>
+
+    <!-- Upgrade overlay (shown when free minutes exhausted) -->
+    <div id="upgradeOverlay" class="upgrade-overlay" style="display:none">
+      <div class="upgrade-card">
+        <div class="upgrade-icon">
+          <svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="#a855f7" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/>
+          </svg>
+        </div>
+        <h3 class="upgrade-title">Free Minutes Used</h3>
+        <p class="upgrade-desc">You've used your 100 free minutes this month.<br/>Upgrade to Meetel Flow+ for unlimited fast dictation.</p>
+        <button id="upgradeBtn" class="upgrade-btn">Upgrade to Flow+ — $10/mo</button>
+        <button id="upgradePowerBtn" class="upgrade-power-btn">Or get Power+ — everything for $100/mo</button>
+        <button id="upgradeCloseBtn" class="upgrade-close">Use Offline Mode (slower)</button>
+      </div>
+    </div>
+
+    <script type="module" src="./renderer.js"></script>
+  </body>
+</html>

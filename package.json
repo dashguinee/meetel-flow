@@ -1,0 +1,55 @@
+{
+  "name": "meetel-flow",
+  "version": "0.1.0",
+  "description": "Meetel Flow desktop dictation shell",
+  "main": "dist/main/index.js",
+  "scripts": {
+    "build": "npm run build:main && npm run build:renderer && npm run copy:assets",
+    "build:main": "tsc -p tsconfig.main.json",
+    "build:renderer": "tsc -p tsconfig.renderer.json",
+    "copy:assets": "cp src/renderer/index.html dist/renderer/index.html && cp src/renderer/styles.css dist/renderer/styles.css",
+    "start": "npm run build && electron .",
+    "dev": "npm run build && electron .",
+    "dist:win": "npm run build && electron-builder --win nsis",
+    "dist:mac": "npm run build && electron-builder --mac dmg",
+    "dist:linux": "npm run build && electron-builder --linux AppImage"
+  },
+  "author": "Meetel",
+  "license": "UNLICENSED",
+  "devDependencies": {
+    "@types/node": "^22.10.5",
+    "electron": "^34.3.0",
+    "electron-builder": "^25.1.8",
+    "typescript": "^5.7.3"
+  },
+  "dependencies": {
+    "@supabase/supabase-js": "^2.97.0",
+    "electron-updater": "^6.3.9"
+  },
+  "build": {
+    "appId": "com.meetel.flow",
+    "productName": "Meetel Flow",
+    "directories": {
+      "buildResources": "build-resources"
+    },
+    "files": [
+      "dist/**/*",
+      "package.json"
+    ],
+    "win": {
+      "target": [
+        "nsis"
+      ]
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true
+    },
+    "publish": [
+      {
+        "provider": "generic",
+        "url": "https://updates.meetel.com/flow"
+      }
+    ]
+  }
+}
