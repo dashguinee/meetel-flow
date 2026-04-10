@@ -6,16 +6,37 @@ import { FlowConfig } from "./types";
 const CONFIG_DIR = path.join(os.homedir(), ".meetel-flow");
 const CONFIG_FILE = path.join(CONFIG_DIR, "config.json");
 
-const BAKED_GROQ = process.env.MEETEL_GROQ_KEY || "";
-const BAKED_GEMINI = process.env.MEETEL_GEMINI_KEY || "";
+// Load keys from: env vars → .meetel-flow/.env → empty
+const loadEnvKeys = (): { groq: string; gemini: string } => {
+  if (process.env.MEETEL_GROQ_KEY) {
+    return { groq: process.env.MEETEL_GROQ_KEY, gemini: process.env.MEETEL_GEMINI_KEY || "" };
+  }
+  // Try loading from ~/.meetel-flow/.env
+  const envPath = path.join(CONFIG_DIR, ".env");
+  try {
+    if (fs.existsSync(envPath)) {
+      const content = fs.readFileSync(envPath, "utf-8");
+      const groq = content.match(/MEETEL_GROQ_KEY=(.+)/)?.[1]?.trim() || "";
+      const gemini = content.match(/MEETEL_GEMINI_KEY=(.+)/)?.[1]?.trim() || "";
+      if (groq) return { groq, gemini };
+    }
+  } catch { /* ignore */ }
+  return { groq: "", gemini: "" };
+};
+
+const envKeys = loadEnvKeys();
+const BAKED_GROQ = envKeys.groq;
+const BAKED_GEMINI = envKeys.gemini;
 
 const defaults: FlowConfig = {
   groqApiKey: BAKED_GROQ,
   geminiApiKey: BAKED_GEMINI,
-  language: "auto",
+  language: "en",
   targetMode: "type",
   viewMode: "panel",
   panelSide: "right",
+  firstRunComplete: false,
+  telemetryEnabled: true,
 };
 
 export const loadConfig = (): FlowConfig => {

@@ -1,13 +1,13 @@
 {
   "name": "meetel-flow",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Meetel Flow desktop dictation shell",
   "main": "dist/main/index.js",
   "scripts": {
     "build": "npm run build:main && npm run build:renderer && npm run copy:assets",
     "build:main": "tsc -p tsconfig.main.json",
     "build:renderer": "tsc -p tsconfig.renderer.json",
-    "copy:assets": "cp src/renderer/index.html dist/renderer/index.html && cp src/renderer/styles.css dist/renderer/styles.css",
+    "copy:assets": "cp src/renderer/index.html dist/renderer/index.html && cp src/renderer/styles.css dist/renderer/styles.css && cp src/renderer/firstrun.html dist/renderer/firstrun.html && cp src/renderer/firstrun.css dist/renderer/firstrun.css",
     "start": "npm run build && electron .",
     "dev": "npm run build && electron .",
     "dist:win": "npm run build && electron-builder --win nsis",
@@ -45,10 +45,39 @@
       "oneClick": false,
       "allowToChangeInstallationDirectory": true
     },
+    "mac": {
+      "category": "public.app-category.productivity",
+      "target": [
+        { "target": "dmg", "arch": ["x64", "arm64"] },
+        { "target": "zip", "arch": ["x64", "arm64"] }
+      ],
+      "hardenedRuntime": true,
+      "gatekeeperAssess": false,
+      "entitlements": "build-resources/entitlements.mac.plist",
+      "entitlementsInherit": "build-resources/entitlements.mac.plist",
+      "notarize": false,
+      "extendInfo": {
+        "NSMicrophoneUsageDescription": "Meetel Flow uses your microphone to transcribe your voice into text in any application.",
+        "NSAppleEventsUsageDescription": "Meetel Flow uses Apple Events to insert transcribed text into other applications.",
+        "NSAccessibilityUsageDescription": "Meetel Flow needs Accessibility access to insert transcribed text into other applications.",
+        "LSUIElement": true,
+        "NSHighResolutionCapable": true,
+        "LSMinimumSystemVersion": "10.15.0"
+      }
+    },
+    "dmg": {
+      "sign": false,
+      "contents": [
+        { "x": 130, "y": 220 },
+        { "x": 410, "y": 220, "type": "link", "path": "/Applications" }
+      ]
+    },
     "publish": [
       {
-        "provider": "generic",
-        "url": "https://updates.meetel.com/flow"
+        "provider": "github",
+        "owner": "dashguinee",
+        "repo": "meetel-flow",
+        "releaseType": "draft"
       }
     ]
   }

@@ -1,0 +1,33 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <!-- Microphone access — required for dictation capture via navigator.mediaDevices.getUserMedia -->
+    <key>com.apple.security.device.audio-input</key>
+    <true/>
+
+    <!-- Required by Electron: V8 uses JIT compilation -->
+    <key>com.apple.security.cs.allow-jit</key>
+    <true/>
+
+    <!-- Required by Electron: V8 writes then executes memory pages -->
+    <key>com.apple.security.cs.allow-unsigned-executable-memory</key>
+    <true/>
+
+    <!-- Required by Electron: loading dynamic libraries at runtime -->
+    <key>com.apple.security.cs.allow-dyld-environment-variables</key>
+    <true/>
+
+    <!-- Required by Electron: disables library validation for unsigned helper bundles -->
+    <key>com.apple.security.cs.disable-library-validation</key>
+    <true/>
+
+    <!-- Outbound HTTPS to Groq, Gemini, Supabase, updates.meetel.com -->
+    <key>com.apple.security.network.client</key>
+    <true/>
+
+    <!-- Apple Events: inserter.ts uses osascript "tell application System Events to keystroke" -->
+    <key>com.apple.security.automation.apple-events</key>
+    <true/>
+</dict>
+</plist>

@@ -1,0 +1,197 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Welcome to Meetel Flow</title>
+    <link rel="stylesheet" href="./firstrun.css" />
+  </head>
+  <body>
+    <div class="fr-resize-edge fr-resize-n"></div>
+    <div class="fr-resize-edge fr-resize-s"></div>
+    <div class="fr-resize-edge fr-resize-w"></div>
+    <div class="fr-resize-edge fr-resize-e"></div>
+
+    <main class="fr-shell">
+      <!-- Top: progress dots + minimise/close -->
+      <header class="fr-topbar">
+        <span class="fr-brand">Meetel Flow</span>
+        <div class="fr-progress" id="frProgress" aria-label="Setup progress">
+          <span class="fr-dot" data-step="1"></span>
+          <span class="fr-dot" data-step="2"></span>
+          <span class="fr-dot" data-step="3"></span>
+          <span class="fr-dot" data-step="4"></span>
+          <span class="fr-dot" data-step="5"></span>
+          <span class="fr-dot" data-step="6"></span>
+        </div>
+      </header>
+
+      <!-- Stage: holds all 6 screens, only one is active at a time -->
+      <section class="fr-stage" id="frStage">
+
+        <!-- ── Screen 1: Welcome ── -->
+        <article class="fr-screen fr-screen--welcome is-active" data-screen="1">
+          <div class="fr-welcome-logo">
+            <div class="fr-logo-ring">
+              <svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+                <path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z"/>
+                <path d="M19 10v2a7 7 0 0 1-14 0v-2"/>
+                <line x1="12" y1="19" x2="12" y2="23"/>
+                <line x1="8" y1="23" x2="16" y2="23"/>
+              </svg>
+            </div>
+            <h1 class="fr-wordmark">Meetel Flow</h1>
+            <p class="fr-tagline">Speak your Mind. <span class="fr-accent">Any Language.</span></p>
+            <p class="fr-subtitle">Press a key, speak in any app, your words appear.</p>
+          </div>
+          <button class="fr-cta" data-action="next-from-welcome">Get Started</button>
+        </article>
+
+        <!-- ── Screen 2: Who are you? ── -->
+        <article class="fr-screen fr-screen--identity" data-screen="2">
+          <header class="fr-screen-head">
+            <h2 class="fr-title">Who are you?</h2>
+            <p class="fr-desc">We use this to create your account and remember your preferences.</p>
+          </header>
+
+          <form id="frIdentityForm" class="fr-form" autocomplete="off" novalidate>
+            <label class="fr-field">
+              <span class="fr-label">Name <span class="fr-optional">(optional)</span></span>
+              <input id="frName" type="text" class="fr-input" placeholder="What should we call you?" maxlength="64" />
+            </label>
+
+            <label class="fr-field">
+              <span class="fr-label">Email</span>
+              <input id="frEmail" type="email" class="fr-input" placeholder="you@example.com" required autocomplete="email" />
+              <span id="frEmailError" class="fr-field-error"></span>
+            </label>
+
+            <button type="button" id="frWhyBtn" class="fr-linklike">Why do we need this?</button>
+            <div id="frWhyBox" class="fr-why-box" hidden>
+              Your email is used only for usage analytics and app improvements. We never share it, never send marketing,
+              and you can delete your account anytime from Settings.
+            </div>
+          </form>
+
+          <div class="fr-nav">
+            <button class="fr-secondary" data-action="back">Back</button>
+            <button class="fr-cta" data-action="submit-identity">Continue</button>
+          </div>
+        </article>
+
+        <!-- ── Screen 3: Microphone permission ── -->
+        <article class="fr-screen fr-screen--mic" data-screen="3">
+          <header class="fr-screen-head">
+            <h2 class="fr-title">Microphone access</h2>
+            <p class="fr-desc">
+              Meetel Flow needs microphone access to transcribe your voice. Your audio is processed and never
+              stored unless you enable history.
+            </p>
+          </header>
+
+          <div class="fr-mic-visual" id="frMicVisual" data-state="pending">
+            <div class="fr-mic-ring">
+              <svg width="42" height="42" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+                <path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z"/>
+                <path d="M19 10v2a7 7 0 0 1-14 0v-2"/>
+                <line x1="12" y1="19" x2="12" y2="23"/>
+                <line x1="8" y1="23" x2="16" y2="23"/>
+              </svg>
+            </div>
+            <span class="fr-mic-status" id="frMicStatus">Not granted yet</span>
+          </div>
+
+          <div id="frMicDeniedHelp" class="fr-help-card" hidden>
+            <strong>Permission blocked.</strong>
+            Open System Settings and enable microphone access for Meetel Flow, then return here and click
+            "Check again".
+          </div>
+
+          <div class="fr-nav">
+            <button class="fr-secondary" data-action="back">Back</button>
+            <button id="frMicGrantBtn" class="fr-cta" data-action="request-mic">Grant Microphone Access</button>
+            <button id="frMicContinueBtn" class="fr-cta" data-action="next-from-mic" hidden>Continue</button>
+          </div>
+        </article>
+
+        <!-- ── Screen 4: Your hotkey ── -->
+        <article class="fr-screen fr-screen--hotkey" data-screen="4">
+          <header class="fr-screen-head">
+            <h2 class="fr-title">Your hotkey</h2>
+            <p class="fr-desc">Press <strong>Ctrl + Space</strong> from anywhere to start dictating.</p>
+          </header>
+
+          <div class="fr-keyboard" id="frKeyboard" aria-label="Keyboard visual">
+            <div class="fr-keycap" id="frKeyCtrl">Ctrl</div>
+            <span class="fr-plus">+</span>
+            <div class="fr-keycap fr-keycap--wide" id="frKeySpace">Space</div>
+          </div>
+
+          <p class="fr-hotkey-hint" id="frHotkeyHint">Waiting for you to press it...</p>
+
+          <div class="fr-nav">
+            <button class="fr-secondary" data-action="back">Back</button>
+            <button id="frHotkeyNextBtn" class="fr-cta" data-action="next-from-hotkey" disabled>Got it</button>
+          </div>
+        </article>
+
+        <!-- ── Screen 5: First dictation ── -->
+        <article class="fr-screen fr-screen--dictate" data-screen="5">
+          <header class="fr-screen-head">
+            <h2 class="fr-title">Try it now</h2>
+            <p class="fr-desc">Let's make sure everything works.</p>
+          </header>
+
+          <div class="fr-instruction-card">
+            <ol class="fr-steps">
+              <li>Open any text field (Notepad, your browser, anywhere).</li>
+              <li>Press <strong>Ctrl + Space</strong>.</li>
+              <li>Say a sentence out loud.</li>
+              <li>Watch your words appear.</li>
+            </ol>
+          </div>
+
+          <div class="fr-capsule-demo" id="frCapsuleDemo">
+            <svg class="fr-capsule-mic" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z"/>
+              <path d="M19 10v2a7 7 0 0 1-14 0v-2"/>
+            </svg>
+            <span class="fr-capsule-label" id="frCapsuleLabel">Listening for Ctrl+Space...</span>
+          </div>
+
+          <button id="frSkipDictation" class="fr-linklike fr-linklike--centered" hidden>
+            Skip for now
+          </button>
+
+          <div class="fr-nav">
+            <button class="fr-secondary" data-action="back">Back</button>
+          </div>
+        </article>
+
+        <!-- ── Screen 6: You're in ── -->
+        <article class="fr-screen fr-screen--done" data-screen="6">
+          <div class="fr-done-wrap">
+            <div class="fr-check-ring">
+              <svg width="44" height="44" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
+                <polyline points="20 6 9 17 4 12"/>
+              </svg>
+            </div>
+            <h2 class="fr-title fr-title--big">You're in.</h2>
+            <p class="fr-desc">Welcome to Meetel Flow. Your workspace is ready.</p>
+
+            <ul class="fr-tips">
+              <li><span class="fr-tip-key">Ctrl+Space</span> anywhere to dictate.</li>
+              <li>Click the capsule for <span class="fr-accent">Ambi</span> mode.</li>
+              <li>Settings are in the tray menu.</li>
+            </ul>
+          </div>
+
+          <button class="fr-cta fr-cta--final" data-action="finish">Start Using</button>
+        </article>
+
+      </section>
+    </main>
+
+    <script type="module" src="./firstrun.js"></script>
+  </body>
+</html>

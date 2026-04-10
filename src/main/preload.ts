@@ -26,4 +26,40 @@ contextBridge.exposeInMainWorld("meetelFlow", {
   onHotkeyToggle: (cb: () => void) => {
     ipcRenderer.on("hotkey:toggle", () => cb());
   },
+
+  // Ambiverse
+  ambiverseCreate: (myLang: string) => ipcRenderer.invoke("ambiverse:create", myLang),
+  ambiverseJoin: (room: string, myLang: string) => ipcRenderer.invoke("ambiverse:join", room, myLang),
+  ambiverseLeave: () => ipcRenderer.invoke("ambiverse:leave"),
+  ambiverseSend: (text: string, lang: string) => ipcRenderer.invoke("ambiverse:send", text, lang),
+  ambiverseStatus: () => ipcRenderer.invoke("ambiverse:status"),
+  onAmbiverseReceived: (cb: (data: { text: string; translated: string; fromLang: string }) => void) => {
+    ipcRenderer.on("ambiverse:received", (_e, data) => cb(data));
+  },
+
+  // Telemetry (allowlisted events only — main process validates)
+  trackEvent: (event: string, payload: Record<string, unknown>) =>
+    ipcRenderer.invoke("telemetry:track", event, payload),
+});
+
+// First-run wizard bridge — separate namespace so it cannot collide with meetelFlow
+contextBridge.exposeInMainWorld("meetelFirstRun", {
+  createUser: (payload: { name: string; email: string }) =>
+    ipcRenderer.invoke("firstrun:createUser", payload),
+
+  requestMicPermission: () =>
+    ipcRenderer.invoke("firstrun:requestMicPermission"),
+
+  testHotkey: () =>
+    ipcRenderer.invoke("firstrun:testHotkey"),
+
+  skipFirstDictation: () =>
+    ipcRenderer.invoke("firstrun:skipFirstDictation"),
+
+  markComplete: () =>
+    ipcRenderer.invoke("firstrun:markComplete"),
+
+  onDictationSuccess: (cb: () => void) => {
+    ipcRenderer.on("firstrun:dictationSuccess", () => cb());
+  },
 });

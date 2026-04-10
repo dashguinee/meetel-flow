@@ -2,8 +2,9 @@ import { createClient } from "@supabase/supabase-js";
 import { DictationResult } from "./types";
 
 const SUPABASE_URL = "https://mclbbkmpovnvcfmwsoqt.supabase.co";
-const SUPABASE_ANON_KEY =
-  "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Im1jbGJia21wb3ZudmNmbXdzb3F0Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3NjgxMzYzNDAsImV4cCI6MjA4MzcxMjM0MH0.F52U5I7L4CYpIIR3IR9Khq0HVDJ1OeMSAtoRza8Dad0";
+// Publishable (anon) key — safe to embed in the client. Service role key must
+// never live in the desktop app: decompiling the installer would expose it.
+const SUPABASE_ANON_KEY = "sb_publishable_9L0m_MUyzJsh9gDXZod6MQ_r0UJBWiu";
 
 const supabase = createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
 

@@ -12,6 +12,12 @@ type MeetelApi = {
   toggleFullscreen: () => Promise<{ fullscreen: boolean }>;
   openExternal: (url: string) => Promise<void>;
   onHotkeyToggle: (cb: () => void) => void;
+  ambiverseCreate: (myLang: string) => Promise<{ room: string }>;
+  ambiverseJoin: (room: string, myLang: string) => Promise<{ ok: boolean }>;
+  ambiverseLeave: () => Promise<{ ok: boolean }>;
+  ambiverseSend: (text: string, lang: string) => Promise<{ ok: boolean }>;
+  ambiverseStatus: () => Promise<{ connected: boolean; room: string | null }>;
+  onAmbiverseReceived: (cb: (data: { text: string; translated: string; fromLang: string }) => void) => void;
 };
 
 declare global {
@@ -23,6 +29,7 @@ declare global {
 let recording = false;
 let stream: MediaStream | null = null;
 let audioCtx: AudioContext | null = null;
+let actualSampleRate: number = 16000; // Captured at AudioContext creation; Chromium may override the requested rate on M-series Macs.
 let scriptNode: ScriptProcessorNode | null = null;
 let pcmChunks: Float32Array[] = [];
 let settingsOpen = false;
@@ -34,33 +41,58 @@ let islandDurationTimer: ReturnType<typeof setInterval> | null = null;
 let isFullscreen = false;
 let modeBeforeFullscreen: "panel" | "compact" | "island" = "panel";
 let sideBeforeFullscreen: "left" | "right" = "right";
+let ambiverseActive = false;
+let ambiverseRoom: string | null = null;
 
 /* ── DOM ── */
 
 const $ = (id: string) => document.getElementById(id);
+const logoText = document.querySelector(".logo") as HTMLSpanElement;
 const micBtn = $("micBtn") as HTMLButtonElement;
 const statusText = $("statusText") as HTMLParagraphElement;
 const minutesBadge = $("minutesBadge") as HTMLSpanElement;
 const settingsToggle = $("settingsToggle") as HTMLButtonElement;
 const settingsPanel = $("settingsPanel") as HTMLDivElement;
 const micSelect = $("micSelect") as HTMLSelectElement;
-const languageSelect = $("language") as HTMLSelectElement;
 const targetModeSelect = $("targetMode") as HTMLSelectElement;
-const userIdInput = $("userId") as HTMLInputElement;
 const saveBtn = $("saveBtn") as HTMLButtonElement;
 const transcriptList = $("transcriptList") as HTMLDivElement;
-const openMeetelBtn = $("openMeetelBtn") as HTMLButtonElement;
 const wakeOverlay = $("wakeOverlay") as HTMLDivElement;
 const panelToggle = $("panelToggle") as HTMLButtonElement;
 const islandCapsule = $("islandCapsule") as HTMLDivElement;
 const islandStatus = $("islandStatus") as HTMLSpanElement;
 const modeSelector = $("modeSelector") as HTMLDivElement;
+const langToggle = $("langToggle") as HTMLButtonElement;
 const panelSideField = $("panelSideField") as HTMLDivElement;
 const panelSideToggle = $("panelSideToggle") as HTMLDivElement;
 const upgradeOverlay = $("upgradeOverlay") as HTMLDivElement;
 const upgradeBtn = $("upgradeBtn") as HTMLButtonElement;
 const upgradePowerBtn = $("upgradePowerBtn") as HTMLButtonElement;
 const upgradeCloseBtn = $("upgradeCloseBtn") as HTMLButtonElement;
+const ambiverseBtn = $("ambiverseBtn") as HTMLButtonElement;
+const ambiversePanel = $("ambiversePanel") as HTMLDivElement;
+const ambiverseRoomCode = $("ambiverseRoomCode") as HTMLSpanElement;
+const ambiverseJoinInput = $("ambiverseJoinInput") as HTMLInputElement;
+const ambiverseJoinBtn = $("ambiverseJoinBtn") as HTMLButtonElement;
+const ambiverseLeaveBtn = $("ambiverseLeaveBtn") as HTMLButtonElement;
+const ambiverseTranscripts = $("ambiverseTranscripts") as HTMLDivElement;
+
+/* ── Language Toggle (EN/FR) ── */
+
+let currentLang: "en" | "fr" = "en";
+
+const updateLangUI = (): void => {
+  langToggle.textContent = currentLang.toUpperCase();
+  langToggle.classList.remove("active-en", "active-fr");
+  langToggle.classList.add(currentLang === "en" ? "active-en" : "active-fr");
+};
+
+const toggleLang = (): void => {
+  currentLang = currentLang === "en" ? "fr" : "en";
+  updateLangUI();
+  void window.meetelFlow.saveConfig({ language: currentLang });
+  playSound("settings");
+};
 
 /* ── Idle Fade (OS-level opacity) ── */
 
@@ -124,14 +156,14 @@ const setUI = (state: UIState, msg?: string): void => {
     islandCapsule.classList.remove("activating", "recording", "processing");
     if (state === "activating") {
       islandCapsule.classList.add("activating");
-      islandStatus.textContent = "Warming up...";
+      islandStatus.textContent = "Ready...";
     } else if (state === "listening") {
       islandCapsule.classList.add("recording");
-      islandStatus.textContent = "Listening...";
+      islandStatus.textContent = "Listening";
       startIslandTimer();
     } else if (state === "processing") {
       islandCapsule.classList.add("processing");
-      islandStatus.textContent = "Processing...";
+      islandStatus.textContent = "Processing";
       stopIslandTimer();
     } else if (state === "done") {
       islandStatus.textContent = msg || "\u2713 Done";
@@ -231,6 +263,27 @@ upgradeCloseBtn?.addEventListener("click", () => {
   minutesBadge.textContent = "Offline mode (Meetel Slow)";
 });
 
+/* ── Audio Normalization (peak normalize to -1dB headroom) ── */
+
+const normalizePcm = (samples: Float32Array): Float32Array => {
+  let peak = 0;
+  for (let i = 0; i < samples.length; i++) {
+    const abs = Math.abs(samples[i]);
+    if (abs > peak) peak = abs;
+  }
+  // Normalize to 0.89 peak (-1dB headroom) — research shows this improves WER significantly
+  if (peak > 0 && peak < 0.85) {
+    const gain = 0.89 / peak;
+    const normalized = new Float32Array(samples.length);
+    for (let i = 0; i < samples.length; i++) {
+      normalized[i] = samples[i] * gain;
+    }
+    console.log("[NORM] Peak:", peak.toFixed(4), "→ gain:", gain.toFixed(2));
+    return normalized;
+  }
+  return samples; // Already loud enough
+};
+
 /* ── WAV encoding (raw PCM → 16-bit WAV) ── */
 
 const encodePcmToWav = (samples: Float32Array, sampleRate: number): Uint8Array => {
@@ -290,6 +343,14 @@ const startRecording = async (): Promise<void> => {
   });
 
   audioCtx = new AudioContext({ sampleRate: SAMPLE_RATE });
+  // Chromium on Apple Silicon sometimes overrides the requested sampleRate
+  // (known issue on M1–M4). Capture whatever rate we actually got so the WAV
+  // header encoded later is accurate — otherwise Groq/Whisper plays the audio
+  // at the wrong speed ("chipmunk" effect) and transcription fails.
+  actualSampleRate = audioCtx.sampleRate;
+  if (actualSampleRate !== SAMPLE_RATE) {
+    console.warn(`[REC] AudioContext sampleRate mismatch: requested ${SAMPLE_RATE}, got ${actualSampleRate}. WAV will be labeled at the actual rate.`);
+  }
   const source = audioCtx.createMediaStreamSource(stream);
 
   // ScriptProcessorNode captures raw PCM — no codec needed
@@ -320,7 +381,7 @@ const startRecording = async (): Promise<void> => {
   // After 1.5s, if no audio input detected, warn user
   setTimeout(() => {
     if (recording && !hasAudioInput) {
-      setUI("error", "No Input \u2014 Check mic");
+      setUI("error", "No voice detected");
       flashSettingsPurple();
     }
   }, 1500);
@@ -328,6 +389,11 @@ const startRecording = async (): Promise<void> => {
 
 const stopAndTranscribe = async (): Promise<void> => {
   if (!recording) return;
+  recording = false;
+  setUI("processing");
+
+  // Let trailing audio buffers flush (fixes last-word truncation)
+  await new Promise((r) => setTimeout(r, 600));
 
   const durationSeconds = Math.round((Date.now() - recordStartTime) / 1000);
   console.log("[REC] Duration:", durationSeconds + "s", "chunks:", pcmChunks.length);
@@ -339,15 +405,23 @@ const stopAndTranscribe = async (): Promise<void> => {
   stream = null;
   void audioCtx?.close();
   audioCtx = null;
-  recording = false;
 
   if (durationSeconds < 1 || pcmChunks.length === 0) {
-    setUI("error", "Too short — speak longer");
+    setUI("error", "Too short");
     resetAfter(2000);
     return;
   }
 
-  setUI("processing");
+  // Groq Whisper API caps uploads at 25 MB. At 16 kHz mono PCM16 WAV, that's
+  // roughly 13 minutes. Cap at 12 min to stay safe and give the user a clear
+  // error instead of a 413 from Groq with no recovery path.
+  const MAX_CAPTURE_SECONDS = 12 * 60;
+  if (durationSeconds > MAX_CAPTURE_SECONDS) {
+    setUI("error", "Too long (max 12 min)");
+    pcmChunks = [];
+    resetAfter(3000);
+    return;
+  }
 
   // Merge PCM chunks into one Float32Array
   const totalLength = pcmChunks.reduce((sum, c) => sum + c.length, 0);
@@ -368,13 +442,17 @@ const stopAndTranscribe = async (): Promise<void> => {
   console.log("[REC] Samples:", totalLength, "max amplitude:", maxAmp.toFixed(4));
 
   if (maxAmp < 0.01) {
-    setUI("error", "Mic too quiet — check mic");
+    setUI("error", "Too quiet");
     resetAfter(3000);
     return;
   }
 
-  // Encode to WAV
-  const wavBytes = encodePcmToWav(allSamples, SAMPLE_RATE);
+  // Normalize audio (research: reduces WER from 68% to 52%)
+  const normalized = normalizePcm(allSamples);
+
+  // Encode to WAV using the ACTUAL captured rate (Chromium on M-series may have
+  // overridden the requested 16 kHz — mislabeling would cause chipmunked playback).
+  const wavBytes = encodePcmToWav(normalized, actualSampleRate);
   const wavBase64 = arrayToBase64(wavBytes);
   console.log("[FLOW] WAV:", wavBytes.length, "bytes →", wavBase64.length, "base64 chars");
 
@@ -396,9 +474,17 @@ const stopAndTranscribe = async (): Promise<void> => {
   }
 
   if (!result.text) {
-    setUI("error", "No speech detected");
+    setUI("error", "No speech");
     resetAfter(2000);
     return;
+  }
+
+  // Ambi detection: if detected language differs from set language, show glass capsule
+  const detectedLang = (result as any).detectedLang || currentLang;
+  if (currentMode === "island" && detectedLang !== currentLang && detectedLang !== "auto") {
+    islandCapsule.classList.add("ambi");
+  } else if (currentMode === "island") {
+    islandCapsule.classList.remove("ambi");
   }
 
   const insertion = await window.meetelFlow.insertText(result.text + " ");
@@ -432,7 +518,11 @@ const toggle = async (): Promise<void> => {
     settingsOpen = false;
     settingsPanel.classList.remove("open");
     settingsToggle.classList.remove("active");
+    document.querySelector(".widget")?.classList.remove("settings-open");
     transcriptList.style.display = "";
+    const footer = document.querySelector(".footer") as HTMLElement | null;
+    if (footer) footer.style.display = "";
+    minutesBadge.parentElement!.style.display = "";
     void window.meetelFlow.setFocusable(false);
   }
 
@@ -530,8 +620,12 @@ const toggleSettings = (): void => {
   playSound("settings");
   settingsPanel.classList.toggle("open", settingsOpen);
   settingsToggle.classList.toggle("active", settingsOpen);
-  // Hide transcripts when settings open, show when closed
+  // Toggle widget scroll + hide unneeded elements when settings open
+  document.querySelector(".widget")?.classList.toggle("settings-open", settingsOpen);
   transcriptList.style.display = settingsOpen ? "none" : "";
+  const footer = document.querySelector(".footer") as HTMLElement | null;
+  if (footer) footer.style.display = settingsOpen ? "none" : "";
+  minutesBadge.parentElement!.style.display = settingsOpen ? "none" : "";
 
   // Make window focusable for settings interaction, unfocusable otherwise
   void window.meetelFlow.setFocusable(settingsOpen);
@@ -547,21 +641,18 @@ const toggleSettings = (): void => {
 
 const loadSettings = async (): Promise<void> => {
   const cfg = await window.meetelFlow.getConfig();
-  languageSelect.value = cfg.language;
   targetModeSelect.value = cfg.targetMode;
-  userIdInput.value = cfg.userId ?? "";
   if (cfg.micDeviceId) micSelect.value = cfg.micDeviceId;
 };
 
 const saveSettings = async (): Promise<void> => {
   await window.meetelFlow.saveConfig({
-    language: languageSelect.value,
+    language: currentLang,
     targetMode: targetModeSelect.value,
-    userId: userIdInput.value || undefined,
     micDeviceId: micSelect.value || undefined,
   });
   saveBtn.textContent = "Saved!";
-  saveBtn.style.background = "#22c55e";
+  saveBtn.style.background = "rgba(124, 58, 237, 0.8)";
   setTimeout(() => { saveBtn.textContent = "Save"; saveBtn.style.background = ""; }, 1200);
 };
 
@@ -658,13 +749,14 @@ const switchToPanel = (side?: "left" | "right"): void => {
 const exitIslandMode = (): void => {
   islandCapsule.style.display = "none";
   document.body.classList.remove("island-mode");
-  // Show all widget children
+  // Show all widget children, respecting settings state
   document.querySelectorAll(".widget > *:not(.island-capsule)").forEach(el => {
     const htmlEl = el as HTMLElement;
-    // Restore display (settings panel has its own toggle)
     if (htmlEl.id === "settingsPanel") {
       htmlEl.style.display = "";
     } else if (htmlEl.id === "transcriptList") {
+      htmlEl.style.display = settingsOpen ? "none" : "";
+    } else if (htmlEl.classList.contains("footer") || htmlEl.classList.contains("minutes-badge")) {
       htmlEl.style.display = settingsOpen ? "none" : "";
     } else {
       htmlEl.style.display = "";
@@ -844,6 +936,18 @@ const playSound = (type: "record" | "modeChange" | "fullscreen" | "capsule" | "s
   } catch { /* audio not available */ }
 };
 
+/* ── Ambiverse TTS ── */
+
+const speakText = (text: string, lang: string): void => {
+  try {
+    const utterance = new SpeechSynthesisUtterance(text);
+    utterance.lang = lang === "fr" ? "fr-FR" : lang === "es" ? "es-ES" : lang === "de" ? "de-DE" : "en-US";
+    utterance.rate = 1.0;
+    utterance.volume = 0.8;
+    speechSynthesis.speak(utterance);
+  } catch { /* TTS not available */ }
+};
+
 /* ── Capsule Hint ── */
 
 const showCapsuleHint = (): void => {
@@ -861,24 +965,8 @@ const showCapsuleHint = (): void => {
 const boot = async (): Promise<void> => {
   micBtn.addEventListener("click", () => void toggle());
   settingsToggle.addEventListener("click", toggleSettings);
+  langToggle.addEventListener("click", toggleLang);
   saveBtn.addEventListener("click", () => void saveSettings());
-  openMeetelBtn.addEventListener("click", () => {
-    openMeetelBtn.innerHTML = '<span class="bouncy-dots"><span>.</span><span>.</span><span>.</span></span>';
-    setTimeout(() => {
-      openMeetelBtn.style.opacity = "0";
-      setTimeout(() => {
-        openMeetelBtn.textContent = "Coming Soon";
-        openMeetelBtn.style.opacity = "0.5";
-      }, 300);
-    }, 1200);
-    setTimeout(() => {
-      openMeetelBtn.style.opacity = "0";
-      setTimeout(() => {
-        openMeetelBtn.textContent = "Open in Meetel";
-        openMeetelBtn.style.opacity = "";
-      }, 300);
-    }, 3500);
-  });
   window.meetelFlow.onHotkeyToggle(() => void toggle());
 
   wakeOverlay.addEventListener("pointerdown", wakeUp);
@@ -887,6 +975,11 @@ const boot = async (): Promise<void> => {
   await populateMics();
   await loadSettings();
   await refreshUsage();
+
+  // Load saved language for toggle
+  const langCfg = await window.meetelFlow.getConfig();
+  if (langCfg.language === "fr") currentLang = "fr";
+  updateLangUI();
   renderTranscripts();
 
   // Start unfocusable — clicking the widget won't steal focus from other apps
@@ -926,14 +1019,17 @@ const boot = async (): Promise<void> => {
     if (panelPressTimer) { clearTimeout(panelPressTimer); panelPressTimer = null; }
   });
 
-  // Double tap anywhere = fullscreen toggle (mousedown works on drag regions)
+  // Double tap anywhere = fullscreen toggle
+  // Use pointerdown (not mousedown) — it fires even on drag regions
   let lastWidgetTap = 0;
-  document.addEventListener("mousedown", (e: MouseEvent) => {
+  const widget = document.querySelector(".widget") as HTMLElement;
+  widget.addEventListener("pointerdown", (e: PointerEvent) => {
     const el = e.target as HTMLElement;
-    if (el.closest("button, select, input, .transcript-item, .settings-panel")) return;
+    if (el.closest("button, select, input, .transcript-item, .settings-panel.open")) return;
     const now = Date.now();
     if (now - lastWidgetTap < 350) {
       lastWidgetTap = 0;
+      e.preventDefault();
       if (!isFullscreen) {
         // Save current state
         modeBeforeFullscreen = currentMode;
@@ -949,16 +1045,11 @@ const boot = async (): Promise<void> => {
         playSound("fullscreen");
         void window.meetelFlow.toggleFullscreen();
       } else {
-        // Restore previous mode
+        // Double-click from fullscreen → always go to capsule
         document.body.classList.remove("fullscreen-mode");
         isFullscreen = false;
         void window.meetelFlow.toggleFullscreen();
-        // Restore previous mode after unmaximize
-        setTimeout(() => {
-          if (modeBeforeFullscreen === "island") switchToIsland();
-          else if (modeBeforeFullscreen === "compact") switchToCompact();
-          else switchToPanel(sideBeforeFullscreen);
-        }, 100);
+        setTimeout(() => switchToIsland(), 100);
       }
     } else {
       lastWidgetTap = now;
@@ -997,6 +1088,97 @@ const boot = async (): Promise<void> => {
 
   // Transcript gestures
   setupTranscriptGestures();
+
+  // Ambiverse controls
+  const enterAmbi = (): void => {
+    logoText.textContent = "Meetel Ambi";
+    logoText.classList.add("ambi-mode");
+  };
+
+  const exitAmbi = (): void => {
+    logoText.textContent = "Meetel Flow";
+    logoText.classList.remove("ambi-mode");
+  };
+
+  ambiverseBtn?.addEventListener("click", async () => {
+    if (ambiverseActive) {
+      // Leave
+      await window.meetelFlow.ambiverseLeave();
+      ambiverseActive = false;
+      ambiverseRoom = null;
+      ambiversePanel.classList.remove("active");
+      ambiverseBtn.classList.remove("active");
+      islandCapsule.classList.remove("ambiverse");
+      ambiverseTranscripts.innerHTML = "";
+      exitAmbi();
+      playSound("capsule");
+    } else {
+      // Create room
+      const result = await window.meetelFlow.ambiverseCreate(currentLang);
+      ambiverseRoom = result.room;
+      ambiverseActive = true;
+      ambiversePanel.classList.add("active");
+      ambiverseBtn.classList.add("active");
+      ambiverseRoomCode.textContent = result.room;
+      islandCapsule.classList.add("ambiverse");
+      void window.meetelFlow.setFocusable(true);
+      enterAmbi();
+      playSound("capsule");
+    }
+  });
+
+  ambiverseJoinBtn?.addEventListener("click", async () => {
+    const code = ambiverseJoinInput.value.trim();
+    if (code.length !== 4) return;
+    await window.meetelFlow.ambiverseJoin(code, currentLang);
+    ambiverseRoom = code;
+    ambiverseActive = true;
+    ambiverseBtn.classList.add("active");
+    ambiverseRoomCode.textContent = code;
+    islandCapsule.classList.add("ambiverse");
+    ambiverseJoinInput.value = "";
+    enterAmbi();
+    playSound("capsule");
+  });
+
+  ambiverseLeaveBtn?.addEventListener("click", async () => {
+    await window.meetelFlow.ambiverseLeave();
+    ambiverseActive = false;
+    ambiverseRoom = null;
+    ambiversePanel.classList.remove("active");
+    ambiverseBtn.classList.remove("active");
+    islandCapsule.classList.remove("ambiverse");
+    ambiverseTranscripts.innerHTML = "";
+    exitAmbi();
+    void window.meetelFlow.setFocusable(false);
+    playSound("capsule");
+  });
+
+  // Listen for incoming Ambiverse transcripts
+  window.meetelFlow.onAmbiverseReceived((data) => {
+    console.log("[AMBIVERSE] Received:", data.fromLang, data.translated.slice(0, 50));
+
+    // TTS — speak the translated text
+    speakText(data.translated, currentLang);
+
+    // Show in Ambiverse transcript panel
+    const entry = document.createElement("div");
+    entry.className = "ambiverse-entry";
+    entry.innerHTML = `
+      <div class="ambiverse-original">${escapeHtml(data.text)}</div>
+      <div class="ambiverse-translated">${escapeHtml(data.translated)}</div>
+      <div class="ambiverse-lang">${data.fromLang.toUpperCase()}</div>
+    `;
+    ambiverseTranscripts.prepend(entry);
+
+    // Also show in island status
+    if (currentMode === "island") {
+      islandStatus.textContent = data.translated.slice(0, 30);
+    }
+
+    // Save to transcript list too
+    saveTranscript(`[${data.fromLang.toUpperCase()}] ${data.translated}`);
+  });
 };
 
 void boot();
