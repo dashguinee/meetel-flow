@@ -31,10 +31,25 @@ let stream: MediaStream | null = null;
 let audioCtx: AudioContext | null = null;
 let actualSampleRate: number = 16000; // Captured at AudioContext creation; Chromium may override the requested rate on M-series Macs.
 let scriptNode: ScriptProcessorNode | null = null;
-let pcmChunks: Float32Array[] = [];
 let settingsOpen = false;
 let recordStartTime = 0;
 let hasAudioInput = false;
+
+// ── Ring buffer (hot mic, captures continuously after first arm) ──────
+// Size: 30 seconds of mono PCM at the actual sample rate. ~960 KB at 16 kHz.
+// The mic is opened once at app start (or first dictation) and stays hot.
+// On hotkey we just slice this buffer with pre-roll/post-roll — no
+// getUserMedia, no AudioContext init, no first-buffer wait. See
+// armMicrophone() / startRecording() / stopAndTranscribe().
+const RING_BUFFER_SECONDS = 30;
+const PRE_ROLL_MS = 250;   // capture from 250ms BEFORE the user pressed start
+const POST_ROLL_MS = 350;  // capture for 350ms AFTER the user pressed stop
+let ringBuffer: Float32Array | null = null;
+let ringBufferWrite = 0;          // next index to write into ringBuffer (mod len)
+let ringBufferTotal = 0;          // monotonic sample counter (never resets)
+let captureStartSample = 0;       // monotonic counter at recording start (with pre-roll)
+let micArmed = false;
+let micArming = false;
 let currentMode: "panel" | "compact" | "island" = "panel";
 let currentSide: "left" | "right" = "right";
 let islandDurationTimer: ReturnType<typeof setInterval> | null = null;
@@ -325,55 +340,173 @@ const arrayToBase64 = (bytes: Uint8Array): string => {
   return btoa(bin);
 };
 
-/* ── Recording (direct PCM capture — no codec, no conversion) ── */
+/* ── Recording (hot mic + ring buffer) ── */
+//
+// Architecture:
+//   1. armMicrophone() runs ONCE at app start (or on first dictation as a
+//      fallback). It opens getUserMedia, builds an AudioContext, attaches a
+//      ScriptProcessor that writes every captured frame into ringBuffer.
+//   2. The mic stays hot for the lifetime of the app. ringBuffer is a 30s
+//      circular buffer. ringBufferTotal is a monotonic sample counter.
+//   3. startRecording() is now O(1): it just marks captureStartSample =
+//      ringBufferTotal - PRE_ROLL_MS samples. Sub-millisecond start.
+//   4. stopAndTranscribe() waits POST_ROLL_MS for the trailing audio to
+//      land in the ring buffer, then slices [captureStartSample, ringBufferTotal].
+//      Mic stays hot — no teardown.
+//
+// Why this matters: the old code called getUserMedia + AudioContext + waited
+// for the first ScriptProcessor buffer on every keypress, costing 300-600ms
+// of audio (which is why the FIRST word was sometimes missing too). Now the
+// mic is already running when the user hits the hotkey, and pre-roll captures
+// the 250ms BEFORE keypress that humans usually start speaking in.
 
 const SAMPLE_RATE = 16000;
 
-const startRecording = async (): Promise<void> => {
-  const deviceId = micSelect.value || undefined;
-
-  stream = await navigator.mediaDevices.getUserMedia({
-    audio: {
-      deviceId: deviceId ? { exact: deviceId } : undefined,
-      echoCancellation: true,
-      noiseSuppression: true,
-      channelCount: 1,
-      sampleRate: SAMPLE_RATE,
-    },
-  });
-
-  audioCtx = new AudioContext({ sampleRate: SAMPLE_RATE });
-  // Chromium on Apple Silicon sometimes overrides the requested sampleRate
-  // (known issue on M1–M4). Capture whatever rate we actually got so the WAV
-  // header encoded later is accurate — otherwise Groq/Whisper plays the audio
-  // at the wrong speed ("chipmunk" effect) and transcription fails.
-  actualSampleRate = audioCtx.sampleRate;
-  if (actualSampleRate !== SAMPLE_RATE) {
-    console.warn(`[REC] AudioContext sampleRate mismatch: requested ${SAMPLE_RATE}, got ${actualSampleRate}. WAV will be labeled at the actual rate.`);
+const armMicrophone = async (): Promise<void> => {
+  if (micArmed) return;
+  if (micArming) {
+    // Wait for an in-flight arm to finish.
+    while (micArming) await new Promise((r) => setTimeout(r, 30));
+    return;
   }
-  const source = audioCtx.createMediaStreamSource(stream);
+  micArming = true;
+  try {
+    const deviceId = micSelect.value || undefined;
+    console.log("[ARM] requesting mic...");
+    const t0 = Date.now();
 
-  // ScriptProcessorNode captures raw PCM — no codec needed
-  const node = audioCtx.createScriptProcessor(4096, 1, 1);
-  pcmChunks = [];
-  hasAudioInput = false;
+    stream = await navigator.mediaDevices.getUserMedia({
+      audio: {
+        deviceId: deviceId ? { exact: deviceId } : undefined,
+        echoCancellation: true,
+        noiseSuppression: true,
+        channelCount: 1,
+        sampleRate: SAMPLE_RATE,
+      },
+    });
 
-  node.onaudioprocess = (e: AudioProcessingEvent) => {
-    const input = e.inputBuffer.getChannelData(0);
-    pcmChunks.push(new Float32Array(input));
-    // Check if we're getting real audio (not silence)
-    if (!hasAudioInput) {
-      for (let i = 0; i < input.length; i++) {
-        if (Math.abs(input[i]) > 0.01) { hasAudioInput = true; break; }
-      }
+    audioCtx = new AudioContext({ sampleRate: SAMPLE_RATE });
+    // Chromium on Apple Silicon sometimes overrides the requested sampleRate
+    // (known issue on M1–M4). Capture whatever rate we actually got so the WAV
+    // header encoded later is accurate — otherwise Groq/Whisper plays the audio
+    // at the wrong speed ("chipmunk" effect) and transcription fails.
+    actualSampleRate = audioCtx.sampleRate;
+    if (actualSampleRate !== SAMPLE_RATE) {
+      console.warn(`[ARM] AudioContext sampleRate mismatch: requested ${SAMPLE_RATE}, got ${actualSampleRate}.`);
     }
-  };
 
-  source.connect(node);
-  node.connect(audioCtx.destination);
-  scriptNode = node;
+    // Allocate the ring buffer at the actual sample rate.
+    ringBuffer = new Float32Array(RING_BUFFER_SECONDS * actualSampleRate);
+    ringBufferWrite = 0;
+    ringBufferTotal = 0;
+
+    const source = audioCtx.createMediaStreamSource(stream);
+    const node = audioCtx.createScriptProcessor(4096, 1, 1);
+
+    node.onaudioprocess = (e: AudioProcessingEvent): void => {
+      const input = e.inputBuffer.getChannelData(0);
+      const ring = ringBuffer;
+      if (!ring) return;
+      const ringLen = ring.length;
+      let w = ringBufferWrite;
+      for (let i = 0; i < input.length; i++) {
+        ring[w] = input[i];
+        w = w + 1 === ringLen ? 0 : w + 1;
+      }
+      ringBufferWrite = w;
+      ringBufferTotal += input.length;
+
+      // Maintain hasAudioInput while actively recording (drives the
+      // "no voice detected" warning).
+      if (recording && !hasAudioInput) {
+        for (let i = 0; i < input.length; i++) {
+          if (Math.abs(input[i]) > 0.01) { hasAudioInput = true; break; }
+        }
+      }
+    };
+
+    source.connect(node);
+    node.connect(audioCtx.destination);
+    scriptNode = node;
+    micArmed = true;
+    console.log(`[ARM] mic hot in ${Date.now() - t0}ms (sr=${actualSampleRate}, ring=${(ringBuffer.length / 1024).toFixed(0)} KB)`);
+  } catch (err) {
+    console.error("[ARM] failed:", err);
+    micArmed = false;
+    // Tear down whatever partially initialised
+    try { scriptNode?.disconnect(); } catch { /* ignore */ }
+    scriptNode = null;
+    try { stream?.getTracks().forEach((t) => t.stop()); } catch { /* ignore */ }
+    stream = null;
+    try { void audioCtx?.close(); } catch { /* ignore */ }
+    audioCtx = null;
+    ringBuffer = null;
+    throw err;
+  } finally {
+    micArming = false;
+  }
+};
+
+const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
+
+// Read `count` samples ending at monotonic position `endSample` (exclusive
+// upper bound = startSample + count). Handles ring wrap-around. Returns a
+// fresh Float32Array. If the requested range is older than what the ring
+// holds, the missing prefix is silently dropped (returns whatever's still
+// in the buffer).
+const readRing = (startSample: number, count: number): Float32Array => {
+  if (!ringBuffer || count <= 0) return new Float32Array(0);
+  const ringLen = ringBuffer.length;
+  const oldestAvailable = Math.max(0, ringBufferTotal - ringLen);
+  let from = startSample;
+  let len = count;
+  if (from < oldestAvailable) {
+    const skip = oldestAvailable - from;
+    from = oldestAvailable;
+    len = Math.max(0, len - skip);
+  }
+  // Newest sample we can read is ringBufferTotal - 1.
+  const maxLen = Math.max(0, ringBufferTotal - from);
+  if (len > maxLen) len = maxLen;
+  if (len <= 0) return new Float32Array(0);
+
+  const out = new Float32Array(len);
+  // Map monotonic `from` to ring index.
+  // ringBufferWrite is the next-write slot, so the most recent sample is at
+  // (ringBufferWrite - 1). The oldest sample (at monotonic position
+  // ringBufferTotal - ringLen) is also at ringBufferWrite (when full).
+  const writePos = ringBufferWrite;
+  const totalAhead = ringBufferTotal - from; // how many samples are between `from` and the newest write
+  let readIdx = writePos - totalAhead;
+  while (readIdx < 0) readIdx += ringLen;
+  for (let i = 0; i < len; i++) {
+    out[i] = ringBuffer[readIdx];
+    readIdx = readIdx + 1 === ringLen ? 0 : readIdx + 1;
+  }
+  return out;
+};
+
+const startRecording = async (): Promise<void> => {
+  // Make sure the mic is hot. Idempotent — only the FIRST call ever pays
+  // the getUserMedia cost; every subsequent dictation is sub-millisecond.
+  if (!micArmed) {
+    try {
+      await armMicrophone();
+    } catch (err) {
+      setUI("error", "Mic blocked");
+      console.error("[REC] arm failed at start:", err);
+      resetAfter(3000);
+      return;
+    }
+  }
+
+  // Pre-roll: capture from PRE_ROLL_MS BEFORE this moment. The ring buffer
+  // is already running, so we just back the start cursor up.
+  const preRoll = Math.round((PRE_ROLL_MS / 1000) * actualSampleRate);
+  captureStartSample = Math.max(0, ringBufferTotal - preRoll);
 
   recording = true;
+  hasAudioInput = false;
   recordStartTime = Date.now();
   setUI("listening");
   playSound("record");
@@ -392,21 +525,23 @@ const stopAndTranscribe = async (): Promise<void> => {
   recording = false;
   setUI("processing");
 
-  // Let trailing audio buffers flush (fixes last-word truncation)
-  await new Promise((r) => setTimeout(r, 600));
+  // Post-roll: wait for POST_ROLL_MS more samples to land in the ring buffer.
+  // The mic stays hot — we're not waiting for getUserMedia, just for the
+  // ScriptProcessor to push the trailing audio into the ring. ~350ms perceived
+  // latency on stop, but it captures the syllable the user was still finishing
+  // when they hit the key.
+  const targetTotal = ringBufferTotal + Math.round((POST_ROLL_MS / 1000) * actualSampleRate);
+  const waitDeadline = Date.now() + POST_ROLL_MS + 200; // hard cap so we never hang
+  while (ringBufferTotal < targetTotal && Date.now() < waitDeadline) {
+    await sleep(20);
+  }
 
+  const captureStopSample = ringBufferTotal;
+  const sampleCount = captureStopSample - captureStartSample;
   const durationSeconds = Math.round((Date.now() - recordStartTime) / 1000);
-  console.log("[REC] Duration:", durationSeconds + "s", "chunks:", pcmChunks.length);
+  console.log(`[REC] Duration: ${durationSeconds}s, slice: ${sampleCount} samples (~${(sampleCount / actualSampleRate).toFixed(2)}s)`);
 
-  // Stop audio pipeline
-  scriptNode?.disconnect();
-  scriptNode = null;
-  stream?.getTracks().forEach((t) => t.stop());
-  stream = null;
-  void audioCtx?.close();
-  audioCtx = null;
-
-  if (durationSeconds < 1 || pcmChunks.length === 0) {
+  if (durationSeconds < 1 || sampleCount === 0) {
     setUI("error", "Too short");
     resetAfter(2000);
     return;
@@ -418,20 +553,13 @@ const stopAndTranscribe = async (): Promise<void> => {
   const MAX_CAPTURE_SECONDS = 12 * 60;
   if (durationSeconds > MAX_CAPTURE_SECONDS) {
     setUI("error", "Too long (max 12 min)");
-    pcmChunks = [];
     resetAfter(3000);
     return;
   }
 
-  // Merge PCM chunks into one Float32Array
-  const totalLength = pcmChunks.reduce((sum, c) => sum + c.length, 0);
-  const allSamples = new Float32Array(totalLength);
-  let offset = 0;
-  for (const chunk of pcmChunks) {
-    allSamples.set(chunk, offset);
-    offset += chunk.length;
-  }
-  pcmChunks = [];
+  // Slice the ring buffer — this gives us [pre-roll → user audio → post-roll]
+  // already concatenated.
+  const allSamples = readRing(captureStartSample, sampleCount);
 
   // Check if there's actual audio (not silence)
   let maxAmp = 0;
@@ -439,7 +567,7 @@ const stopAndTranscribe = async (): Promise<void> => {
     const abs = Math.abs(allSamples[i]);
     if (abs > maxAmp) maxAmp = abs;
   }
-  console.log("[REC] Samples:", totalLength, "max amplitude:", maxAmp.toFixed(4));
+  console.log("[REC] Samples:", allSamples.length, "max amplitude:", maxAmp.toFixed(4));
 
   if (maxAmp < 0.01) {
     setUI("error", "Too quiet");
@@ -450,9 +578,24 @@ const stopAndTranscribe = async (): Promise<void> => {
   // Normalize audio (research: reduces WER from 68% to 52%)
   const normalized = normalizePcm(allSamples);
 
+  // Bookend with digital silence so Whisper doesn't truncate the last word.
+  // ──────────────────────────────────────────────────────────────────────
+  // Whisper's known architectural quirk: when audio ends abruptly right after
+  // the last word, the decoder treats the trailing edge as the no-speech region
+  // and eats the final word/syllable. Documented across openai/whisper#29,
+  // #1278, #493, and the OpenAI Cookbook. The community-blessed fix is to pad
+  // the audio with zero samples on both sides so Whisper has trailing/leading
+  // context to anchor real speech against. ~25 KB extra per dictation.
+  const PAD_END_MS = 800;
+  const PAD_START_MS = 200;
+  const padEnd = Math.round((PAD_END_MS / 1000) * actualSampleRate);
+  const padStart = Math.round((PAD_START_MS / 1000) * actualSampleRate);
+  const padded = new Float32Array(padStart + normalized.length + padEnd);
+  padded.set(normalized, padStart);
+
   // Encode to WAV using the ACTUAL captured rate (Chromium on M-series may have
   // overridden the requested 16 kHz — mislabeling would cause chipmunked playback).
-  const wavBytes = encodePcmToWav(normalized, actualSampleRate);
+  const wavBytes = encodePcmToWav(padded, actualSampleRate);
   const wavBase64 = arrayToBase64(wavBytes);
   console.log("[FLOW] WAV:", wavBytes.length, "bytes →", wavBase64.length, "base64 chars");
 
@@ -984,6 +1127,14 @@ const boot = async (): Promise<void> => {
 
   // Start unfocusable — clicking the widget won't steal focus from other apps
   void window.meetelFlow.setFocusable(false);
+
+  // Arm the microphone NOW so the first dictation has zero cold-start cost.
+  // Mic stays hot for the lifetime of the app and feeds a 30s ring buffer that
+  // startRecording() slices on demand. Failure here is non-fatal — the first
+  // dictation will arm the mic on demand as a fallback.
+  void armMicrophone().catch((err) => {
+    console.warn("[BOOT] mic pre-arm failed (will retry on first dictation):", err);
+  });
 
   // Panel toggle: tap cycles R→L→compact, hold 2s = capsule
   let panelPressTimer: ReturnType<typeof setTimeout> | null = null;

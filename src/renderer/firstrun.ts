@@ -416,8 +416,9 @@ async function stopAndTranscribeWizard(): Promise<void> {
   capsule.classList.remove("is-listening");
   setCapsuleLabel("Transcribing...");
 
-  // Let trailing buffers flush.
-  await new Promise((r) => window.setTimeout(r, 500));
+  // Keep capturing for 800ms after the user releases the hotkey — humans
+  // hit the key slightly before they finish the last syllable.
+  await new Promise((r) => window.setTimeout(r, 800));
 
   const durationSeconds = Math.max(1, Math.round((Date.now() - dictationStartedAt) / 1000));
   dictationScriptNode?.disconnect();
@@ -451,7 +452,17 @@ async function stopAndTranscribeWizard(): Promise<void> {
     return;
   }
 
-  const wavBytes = encodePcmToWavBytes(allSamples, dictationActualSampleRate);
+  // Bookend with digital silence so Whisper doesn't truncate the last word.
+  // See renderer.ts stopAndTranscribe() for the full rationale — short version:
+  // Whisper eats the final syllable if audio ends abruptly. Pad with zeros.
+  const PAD_END_MS = 800;
+  const PAD_START_MS = 200;
+  const padEnd = Math.round((PAD_END_MS / 1000) * dictationActualSampleRate);
+  const padStart = Math.round((PAD_START_MS / 1000) * dictationActualSampleRate);
+  const padded = new Float32Array(padStart + allSamples.length + padEnd);
+  padded.set(allSamples, padStart);
+
+  const wavBytes = encodePcmToWavBytes(padded, dictationActualSampleRate);
   const wavBase64 = bytesToBase64(wavBytes);
 
   let result: { text?: string; provider?: string; error?: string };
