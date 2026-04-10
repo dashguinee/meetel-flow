@@ -21,71 +21,47 @@ before insertion.
 ## High-level architecture
 
 ```
-              ┌────────────────────────────────────────────────────┐
-              │              MAIN PROCESS (Node)                   │
-              │                                                    │
-              │  src/main/index.ts        — Electron lifecycle,    │
-              │  ├─ globalShortcut          windows, IPC routing   │
-              │  ├─ BrowserWindow           tray, hotkey register  │
-              │  ├─ Tray                                           │
-              │  │                                                 │
-              │  ├── stt.ts      — Groq Whisper HTTPS + whisper.cpp│
-              │  ├── filters.ts  — hallucination + RMS filter      │
-              │  ├── inserter.ts — clipboard-paste via SendKeys/   │
-              │  │                 osascript                       │
-              │  ├── telemetry.ts── Supabase client singleton,     │
-              │  ├── sync.ts          queue, backoff, identifyUser │
-              │  ├── config.ts   — ~/.meetel-flow/config.json      │
-              │  ├── usage.ts    — 100min/mo free cap              │
-              │  ├── ambiverse.ts── Supabase Realtime bilingual    │
-              │  │                    room (broadcast channel)     │
-              │  └── updater.ts  — electron-updater                │
-              │                                                    │
-              │           preload.ts (contextBridge)               │
-              │               ↑                ↑                   │
-              │       window.meetelFlow   window.meetelFirstRun    │
-              └────────────┬────────────────────┬──────────────────┘
-                           │                    │
-                      IPC (invoke)          IPC (invoke)
-                           │                    │
-              ┌────────────▼──────┐   ┌─────────▼─────────────┐
-              │  RENDERER:        │   │  RENDERER:            │
-              │  main capsule     │   │  first-run wizard     │
-              │  (index.html +    │   │  (firstrun.html +     │
-              │   renderer.ts)    │   │   firstrun.ts)        │
-              │                   │   │                       │
-              │  • hot mic ring   │   │  6 screens            │
-              │    buffer (30s)   │   │  arm/disarm dance     │
-              │  • WAV encoder    │   │  mic probe            │
-              │  • 3 view modes:  │   │  in-window dictation  │
-              │    panel/compact/ │   │                       │
-              │    island         │   │                       │
-              │  • localStorage   │   │                       │
-              │    transcripts    │   │                       │
-              └────────┬──────────┘   └─────────┬─────────────┘
-                       │                        │
-                       │     audio / text       │
-                       └───────┬────────────────┘
-                               │
-                               ▼
-            ┌───────────────────────────────────────┐
-            │  CLOUD                                │
-            │                                       │
-            │  api.groq.com (Whisper + Llama)       │
-            │  generativelanguage.googleapis.com    │
-            │      (Gemini polish fallback)         │
-            │  mclbbkmpovnvcfmwsoqt.supabase.co     │
-            │      (users, events, transcripts,     │
-            │       Realtime channels)              │
-            └───────────────────────────────────────┘
+  ┌─────────────────────── MAIN PROCESS (Node) ──────────────────────┐
+  │  index.ts    — Electron lifecycle, windows, tray, IPC routing    │
+  │  stt.ts      — Groq Whisper HTTPS + whisper.cpp fallback + polish│
+  │  filters.ts  — hallucination + RMS + duration predicates         │
+  │  inserter.ts — SendKeys / osascript clipboard-paste              │
+  │  telemetry.ts + events.ts — Supabase queue, backoff, identifyUser│
+  │  sync.ts     — fire-and-forget meetel_transcripts insert         │
+  │  config.ts + usage.ts — ~/.meetel-flow/{config,usage}.json       │
+  │  ambiverse.ts — Supabase Realtime bilingual room                 │
+  │  updater.ts  — electron-updater                                  │
+  │  preload.ts  — contextBridge: meetelFlow + meetelFirstRun        │
+  └──────────────┬─────────────────────────┬─────────────────────────┘
+                 │ IPC invoke              │ IPC invoke
+  ┌──────────────▼────────┐  ┌─────────────▼────────────────┐
+  │  RENDERER: capsule    │  │  RENDERER: first-run wizard  │
+  │  index.html +         │  │  firstrun.html +             │
+  │  renderer.ts          │  │  firstrun.ts                 │
+  │                       │  │                              │
+  │  • hot mic ring buf   │  │  • 6 screens                 │
+  │  • WAV encoder        │  │  • arm/disarm dance          │
+  │  • 3 view modes       │  │  • own dictation demo        │
+  │  • localStorage txs   │  │                              │
+  └───────────┬───────────┘  └─────────────┬────────────────┘
+              │         audio / text       │
+              └─────────────┬──────────────┘
+                            ▼
+              ┌─────────────────────────────────┐
+              │  CLOUD                          │
+              │  api.groq.com (Whisper + Llama) │
+              │  generativelanguage (Gemini)    │
+              │  mclbbkmpovnvcfmwsoqt.supabase  │
+              └─────────────────────────────────┘
 ```
 
-**Boundary summary**
-
-- **OS ↔ main**: `globalShortcut` (hotkey capture), tray, NSIS installer state, auto-updater, keystroke/paste scripts (`powershell SendKeys` on Windows, `osascript` on macOS), Electron session permissions.
-- **Main ↔ renderer**: all audio bytes flow via IPC as base64 WAV; all config is main-owned (`~/.meetel-flow/config.json`); renderer can only request config through preload channels.
-- **Renderer ↔ cloud**: renderer never talks to cloud directly. STT, LLM polish, and Supabase writes all happen in main.
-- **Exception**: `ambiverse.ts` (main) creates Supabase Realtime broadcast channels. The live-translation feature is the only bidirectional cloud socket.
+**Boundaries**: OS ↔ main for `globalShortcut`, tray, NSIS installer state,
+auto-updater, keystroke/paste scripts, Electron session permissions. Main ↔
+renderer for everything — all audio flows as base64 WAV over IPC, all config
+lives in main. Renderer ↔ cloud never happens directly (STT, LLM polish,
+Supabase writes all go through main). **Exception**: `ambiverse.ts` opens a
+Supabase Realtime broadcast channel in main for live translation — the only
+bidirectional cloud socket.
 
 ---
 
@@ -94,33 +70,32 @@ before insertion.
 ### Main process — `src/main/`
 
 One Electron main process hosts every privileged operation: window management,
-global hotkey registration, filesystem config, HTTPS calls to Groq/Gemini, child
-process spawns for `whisper-cli.exe` and the paste script, Supabase client, and
-the telemetry queue. `src/main/index.ts` is the only file allowed to import from
-`electron`. Every other module in `src/main/` is pure Node + `@supabase/supabase-js`
-or uses `electron` only for a tiny surface (`clipboard` in `inserter.ts`, `app` in
-`telemetry.ts`, `autoUpdater` in `updater.ts`).
+global hotkey, filesystem config, HTTPS to Groq/Gemini, `execFile` for whisper.cpp
+and the paste scripts, Supabase client, telemetry queue. `src/main/index.ts` is
+the only file that imports `electron` broadly; every other module uses pure Node
+or a tiny `electron` surface (`clipboard` in `inserter.ts`, `app` in `telemetry.ts`,
+`autoUpdater` in `updater.ts`).
 
-Debug log redirection lives at the top of `index.ts`: `console.log` / `console.error`
-get wrapped to also append to `~/.meetel-flow/debug.log` with millisecond
-timestamps. Every subsequent `console.log` in main lands there — do not add
-try/catch that swallows errors back to `null`, it defeats the diagnostic path.
+Debug redirection lives at the top of `index.ts`: `console.log`/`console.error`
+are wrapped to also append to `~/.meetel-flow/debug.log` with timestamps. Every
+main-side log lands there — don't add try/catch that swallows errors back to
+`null`, it defeats the diagnostic path.
 
 ### Renderer processes — 2 separate BrowserWindows
 
-The app boots into **one of two** renderer windows depending on
+The app boots into one of two renderer windows depending on
 `config.firstRunComplete`:
 
-| Window | Script | HTML | Preload bridge | BrowserWindow flags |
+| Window | Script | HTML | Preload bridge | Flags |
 |---|---|---|---|---|
-| Main capsule | `renderer.ts` | `index.html` | `window.meetelFlow` | frameless, transparent, alwaysOnTop, `focusable: false`, `skipTaskbar: true` |
-| First-run wizard | `firstrun.ts` | `firstrun.html` | `window.meetelFirstRun` (+ `meetelFlow` subset for STT) | frameless, transparent, `focusable: true`, `show: false` until `ready-to-show` |
+| Capsule | `renderer.ts` | `index.html` | `window.meetelFlow` | frameless, transparent, alwaysOnTop, `focusable: false`, `skipTaskbar: true` |
+| Wizard | `firstrun.ts` | `firstrun.html` | `window.meetelFirstRun` (+ `meetelFlow` subset) | frameless, transparent, `focusable: true`, `show: false` until `ready-to-show` |
 
-Isolation: `contextIsolation: true`, `nodeIntegration: false` on both. The
-renderer cannot `require()`, cannot touch the filesystem, cannot make arbitrary
-HTTPS calls — only the channels explicitly exposed by `preload.ts` exist on
-`window.*`. This is also why all audio data flows as base64 strings over IPC
-(Electron IPC doesn't cleanly marshal raw Buffers across the context bridge).
+Both: `contextIsolation: true`, `nodeIntegration: false`. Renderer cannot
+`require()`, cannot touch the filesystem, cannot make arbitrary HTTPS calls —
+only the channels explicitly exposed by `preload.ts` exist on `window.*`.
+Audio flows as base64 strings over IPC because raw Buffers don't marshal
+cleanly across the context bridge.
 
 ### IPC channels
 
@@ -204,180 +179,121 @@ Every channel is `ipcMain.handle` (promise-based) unless noted. Sender → recei
 ## Dictation pipeline (the hot path)
 
 What happens between `Ctrl+Space` down and text appearing in the user's target
-app, in order. Every step names the file that owns it.
+app. Every step names the load-bearing file.
 
-### 1. Hotkey detection
-
-**Main process** (`src/main/index.ts`):
+### 1. Hotkey detection — `src/main/index.ts`
 
 ```ts
-const HOTKEY = "Control+Space";   // LITERAL, not CommandOrControl — see gotchas
+const HOTKEY = "Control+Space";   // LITERAL, not CommandOrControl
 globalShortcut.register(HOTKEY, hotkeyToggle);
-// hotkeyToggle() → mainWindow.webContents.send("hotkey:toggle")
-//                → firstRunWindow.webContents.send("firstrun:hotkeyFired")
+// hotkeyToggle sends "hotkey:toggle" to the capsule, "firstrun:hotkeyFired" to the wizard
 ```
 
 Electron's `globalShortcut.register()` uses `RegisterHotKey` on Windows and
 `CGEventTap` on macOS. The OS intercepts the chord **before** any window's
-keydown listener sees it. That's normally what we want — the user can be in
-Notion, VS Code, a browser, anything — but it breaks first-run teach mode,
-which is why the wizard does an arm/disarm dance (see below).
+keydown listener sees it — great for normal use (user can be in any app),
+fatal for the first-run teach mode (hence the arm/disarm dance, see wizard
+section). Renderer subscribes via `window.meetelFlow.onHotkeyToggle()`.
 
-Renderer (`renderer.ts::boot`) subscribes via
-`window.meetelFlow.onHotkeyToggle(() => toggle())`. The IPC event's only
-payload is a telemetry `hotkey_fired` track on the main side.
+### 2. Audio capture — `src/renderer/renderer.ts::armMicrophone` → `startRecording` → `stopAndTranscribe`
 
-### 2. Audio capture — hot-mic ring buffer with pre/post-roll
-
-**Renderer** (`src/renderer/renderer.ts::armMicrophone` → `startRecording` →
-`stopAndTranscribe`):
-
-The mic is opened **once** at app start via `getUserMedia`, attached to an
+The mic is opened **once** at app boot via `getUserMedia`, attached to an
 `AudioContext` + `ScriptProcessorNode`, and kept hot for the lifetime of the
 app. Every incoming frame writes into a 30-second circular `Float32Array`
-ring buffer (`RING_BUFFER_SECONDS = 30`, roughly 960 KB at 16 kHz mono). A
-monotonic sample counter (`ringBufferTotal`) never resets, so the slicer can
-map absolute sample positions to ring indices regardless of wrap-around.
+ring buffer (~960 KB at 16 kHz mono). A monotonic sample counter
+(`ringBufferTotal`) never resets, so slicing survives wrap-around.
 
-On hotkey:
+On hotkey: `captureStartSample = ringBufferTotal - preRoll` (250ms before
+press). On stop: `sleep(POST_ROLL_MS=350)` to let trailing audio land, then
+`readRing(startSample, stopSample - startSample)`.
 
-```
-captureStartSample = ringBufferTotal - preRoll   // 250ms BEFORE user pressed start
-// ...user speaks...
-// on stop:
-await sleep(POST_ROLL_MS);                        // wait for 350ms trailing audio
-captureStopSample = ringBufferTotal;
-allSamples = readRing(captureStartSample, stopSample - startSample);
-```
+**Why pre-roll**: old code called `getUserMedia` + new `AudioContext` on
+every press, costing 300–600ms — which was *the reason the first word was
+often missing*. **Why post-roll**: users release the key while still
+finishing the last syllable.
 
-Why pre-roll: users start speaking slightly before they hit the key. The old
-code called `getUserMedia` + `new AudioContext()` + waited for the first
-buffer on every press, costing 300–600ms — which was *the reason the first
-word was often missing*. Now the first dictation is sub-millisecond cold
-start and every subsequent one is identical.
+### 3. WAV encode + silence padding (same file)
 
-Why post-roll: users release the key while still finishing the last syllable.
-~350ms of trailing audio catches it.
+1. **Peak-normalise** to -1 dB headroom (`normalizePcm`) — cuts WER from
+   68% → 52% on quiet captures.
+2. **Pad with zero samples**: 200 ms pre + 800 ms post. Whisper's decoder
+   treats trailing non-speech as the stop region and **eats the final
+   syllable** if audio ends abruptly (see `openai/whisper#29`, `#493`,
+   `#1278`). ~25 KB overhead per dictation.
+3. **Encode to 16-bit PCM WAV** using `actualSampleRate` from the live
+   AudioContext (NOT the requested 16 kHz — Chromium on M-series Macs
+   overrides it; encoding at the wrong rate causes chipmunk playback).
+4. Base64-encode and ship via IPC `stt:transcribe`.
 
-### 3. WAV encode + silence padding
+### 4. STT — `src/main/stt.ts::transcribe`
 
-Still in `renderer.ts::stopAndTranscribe`:
+**Primary (Groq)**: `POST api.groq.com/openai/v1/audio/transcriptions`,
+multipart with `model=whisper-large-v3`, `response_format=verbose_json`,
+`timestamp_granularities[]=word,segment`, `temperature=0`, 30s timeout.
+Language is forced when user selected `en`/`fr`. A language-specific
+**prompt** (`"Meeting transcript..."` + glossary `Meetel, DASH, TypeScript,
+React, Supabase, Vercel`) primes the decoder — removing it hurts proper
+noun accuracy.
 
-1. **Peak normalise** to -1 dB headroom (`normalizePcm`) — research in the
-   commit history shows this reduces WER from 68% → 52% on quiet captures.
-2. **Bookend with digital silence**: 200 ms pre-pad + 800 ms post-pad of
-   zeros. Whisper's architecture treats trailing non-speech as the "stop"
-   region and **eats the final word/syllable** if audio ends abruptly. This
-   is a known quirk documented across `openai/whisper#29`, `#493`, `#1278`.
-   The community fix is to pad with zeros. ~25 KB extra per dictation.
-3. **Encode to 16-bit PCM WAV** using the *actual* sample rate captured from
-   `audioCtx.sampleRate`, not the requested 16 kHz — Chromium on M-series
-   Macs sometimes overrides the requested rate, and encoding at the wrong
-   rate causes "chipmunk" playback and a broken transcription.
-4. **Base64-encode** and ship via `window.meetelFlow.transcribe(...)`.
+**Fallback (whisper.cpp)**: `execFile` on `~/.meetel-flow/whisper/whisper-cli.exe`
+with `-m ggml-base.bin -f tmp.wav -l auto --no-timestamps -t 4`. Do NOT
+pass `--print-special false` — see gotcha 7.
 
-### 4. STT call — Groq Whisper primary, whisper.cpp fallback
+Groq returns per-segment `avg_logprob`, `no_speech_prob`, `compression_ratio`
+which drive the hallucination filter in step 5.
 
-**Main** (`src/main/stt.ts::transcribe`):
+### 5. Quality filter + cleanup + voice commands (still `stt.ts`)
 
-**Primary path — Groq API**:
+Chained in order:
 
-- `POST https://api.groq.com/openai/v1/audio/transcriptions`
-- Multipart form: `model=whisper-large-v3`, `response_format=verbose_json`,
-  `timestamp_granularities[]=word,segment`, `temperature=0`
-- Language is forced when the user selected `en` or `fr` (otherwise
-  auto-detect)
-- A language-specific **prompt** primes the transcription style:
-  `"Meeting transcript. The team discussed..."` + a glossary of proper nouns
-  (`Meetel, DASH, TypeScript, React, Supabase, Vercel`). This works because
-  Whisper's `prompt` parameter conditions the decoder.
-- 30-second timeout
+1. **`filters.ts::filterTranscriptionResult`** — gate on empty text,
+   `durationMs < 300`, RMS < 500, or known hallucination phrase
+   (per-language dict, ~200 entries: "sous-titrage de la Société
+   Radio-Canada", "thanks for watching", "ご視聴ありがとうございました", ...).
+2. **`filterHallucinations(text, segments)`** — drops segments with
+   `no_speech_prob > 0.6`, `compression_ratio > 2.4` (repetitive),
+   `avg_logprob < -1.0` (low confidence), or duplicates (Whisper looping).
+3. **`regexCleanup`** — strips YouTube-outro boilerplate, EN/FR filler
+   words, collapses whitespace, capitalises sentence starts and standalone `I`.
+4. **`processVoiceCommands`** — bilingual voice-to-punctuation:
+   "new line"/"nouvelle ligne" → `\n`, "period"/"point" → `.` (FR `point`
+   excluded before `de`/`d'`), "comma"/"virgule", "question mark"/
+   "point d'interrogation", etc.
 
-**Fallback path — whisper.cpp local binary**:
-
-- Located at `~/.meetel-flow/whisper/whisper-cli.exe` + `ggml-base.bin`
-- Spawned via `execFile` with `["-m", model, "-f", wav, "-l", lang, "--no-timestamps", "-t", "4"]`
-- **Gotcha**: do NOT pass `--print-special false`. It's a boolean flag that
-  defaults to false; passing a value made `whisper-cli` treat `"false"` as a
-  positional filename arg and broke the entire fallback path. Removed.
-- Output post-processed: strip `[BLANK_AUDIO]` and any bracketed tokens.
-
-On the Groq path, the result includes per-segment `avg_logprob`,
-`no_speech_prob`, `compression_ratio` which drive the **hallucination
-filter**.
-
-### 5. Quality filter + hallucination removal + regex cleanup + voice commands
-
-Still in `stt.ts`, chained in this order:
-
-1. `filters.ts::filterTranscriptionResult` — gate on:
-    - Empty text → reject
-    - `durationMs < 300` → reject (button bounce)
-    - RMS of raw PCM16 < 500 → reject ("too quiet")
-    - Known hallucination phrase match (per-language dictionary with
-      ~200 entries: "sous-titrage de la Société Radio-Canada", "thanks for
-      watching", "ご視聴ありがとうございました", etc.)
-2. `stt.ts::filterHallucinations(text, segments)` — uses Groq's per-segment
-   quality metrics to drop segments with `no_speech_prob > 0.6`,
-   `compression_ratio > 2.4` (repetitive = hallucinated), or
-   `avg_logprob < -1.0` (low confidence). Also de-dupes repeated segments
-   (Whisper looping).
-3. `stt.ts::regexCleanup(text)` — removes YouTube-outro phrases (catch-all
-   redundant with filters.ts), English + French filler words, collapses
-   whitespace, capitalises sentence starts, capitalises standalone "I".
-4. `stt.ts::processVoiceCommands(text)` — bilingual voice-to-punctuation
-   mapping:
-    - "new line" / "nouvelle ligne" → `\n`
-    - "new paragraph" / "nouveau paragraphe" → `\n\n`
-    - "period" / "point" → `.`  (French `point` excluded when followed by `de`/`d'`)
-    - "comma" / "virgule", "question mark" / "point d'interrogation", etc.
-
-### 6. LLM polish
-
-**Main** (`stt.ts::llmPolish`):
+### 6. LLM polish — `stt.ts::llmPolish`
 
 ```
 llmPolish(text, groqKey, geminiKey, language):
     if groqKey:
-        result = groqPolish(text)    // model=llama-3.3-70b-versatile
-        if result: return result     // ← success
+        result = groqPolish(text, "llama-3.3-70b-versatile", temp=0.1, 10s)
+        if result: return result
         // falls through on HTTP !== 200, 429 rate limit, timeout, empty
     if geminiKey:
-        return geminiPolish(text)    // model=gemini-2.0-flash
-    return text                      // no LLM → pass raw text through
+        return geminiPolish(text, "gemini-2.0-flash", temp=0.1, 10s)
+    return text  // no LLM available → raw text through
 ```
 
-Prompts are **language-specific** (`POLISH_PROMPT`) and explicitly say
-*"The text IS in French — do NOT translate anything to English"* or vice
-versa. Early versions had the model silently translating. The English
-prompt lists filler words + hallucination phrases. The French prompt also
-enumerates ~15 common French accents to fix (`etais→étais`, `meme→même`,
-`deja→déjà`, etc.) because Groq Whisper large-v3 frequently drops them.
+`POLISH_PROMPT` is **language-specific** and explicitly says
+*"The text IS in French — do NOT translate anything to English"* (and vice
+versa). Early versions had the model silently translating. The FR prompt
+also enumerates ~15 common accent fixes (`etais→étais`, `meme→même`,
+`deja→déjà`, etc.) because Whisper large-v3 drops them frequently.
 
-Temperature: 0.1, max_tokens: 2048, timeout: 10s.
+### 7. Insert at cursor — `src/main/inserter.ts`
 
-### 7. Insert at cursor
+Per-platform, clipboard+paste pattern (save prev clipboard → set text →
+invoke native paste → restore prev clipboard after 500ms):
 
-**Main** (`src/main/inserter.ts::insertText`):
+- **Windows**: `powershell ... [System.Windows.Forms.SendKeys]::SendWait('^v')`
+- **macOS**: `osascript -e 'tell application "System Events" to keystroke "v" using command down'`
+- **Linux**: clipboard-only, user pastes manually
+- `targetMode="clipboard"` skips the paste step
 
-Per-platform branching:
-
-- **Windows** (`typeOnWindows`): save existing clipboard, write new text,
-  `powershell -NoProfile -ExecutionPolicy Bypass -Command "Add-Type -AssemblyName System.Windows.Forms; Start-Sleep -Milliseconds 80; [System.Windows.Forms.SendKeys]::SendWait('^v')"`,
-  restore old clipboard after 500ms. **Why clipboard+paste instead of
-  `SendKeys "text"`**: SendKeys strips Unicode — French accents (`é è ç à`),
-  CJK, and emoji get mangled or dropped.
-- **macOS** (`typeOnMac`): same pattern but with `osascript -e 'tell application "System Events" to keystroke "v" using command down'`.
-  **Why not `keystroke "the text"`**: same Unicode-stripping problem. Also:
-  this path does NOT require Accessibility permission — only Automation,
-  which most apps grant on first use without a blocking dialog.
-- **Linux**: clipboard-only (no reliable paste script, user pastes manually).
-- **Clipboard mode** (`config.targetMode === "clipboard"`): skip the paste
-  step entirely, just write to clipboard.
-
-Failure on Mac leaves text on clipboard and throws
-`"Paste blocked — text copied to clipboard. Press Cmd+V to insert."` — a
-graceful failure, not a silent one.
+Never use `SendKeys::SendWait(text)` or `keystroke "text"` directly — both
+strip Unicode (accents, CJK, emoji). Mac's `osascript` path does not
+require Accessibility, only Automation (auto-granted by most apps). On
+Mac failure, text stays on clipboard and the function throws a
+user-actionable "press Cmd+V" error — graceful, not silent.
 
 ### 8. Telemetry + transcript upload
 
@@ -825,417 +741,277 @@ reading the code.
 
 ### `src/main/index.ts` (471 lines)
 
-**Description**: Electron app entrypoint. Creates BrowserWindows (main
-capsule OR first-run wizard, mutually exclusive on boot), registers all
-`ipcMain.handle` channels, manages the global hotkey registration, wires
-up the tray, bootstraps telemetry, wires the auto-updater. Also installs
-the `console.log`/`console.error` → `~/.meetel-flow/debug.log` redirect
-at the top of the file.
-
-**Key exports**: none (side-effect entrypoint).
+Electron app entrypoint. Creates BrowserWindows (capsule OR wizard, mutually
+exclusive on boot), registers every `ipcMain.handle` channel, owns the global
+hotkey, wires the tray + auto-updater, bootstraps telemetry. Installs a
+`console.log`/`console.error` → `~/.meetel-flow/debug.log` redirect at the top
+of the file.
 
 **Gotchas before editing**:
-- The `console.log` override must stay at the very top. Moving it below
-  other imports means those imports' logs never reach `debug.log`.
+- The `console.log` override must stay at the very top. Moving it below other
+  imports means those imports' logs never reach `debug.log`.
 - `HOTKEY` must be literal `"Control+Space"`, NOT `"CommandOrControl+Space"`.
-  See gotcha 3.
-- `firstRunDictationFired` is a one-shot flag that drives the wizard's
-  advance-on-success event. Don't reset it.
-- The boot decision is `if (!initialCfg.firstRunComplete) { wizard } else { capsule }`.
-  Tray and hotkey register in BOTH branches so the wizard can teach the
-  hotkey on screen 4.
-- `ipcMain.handle("telemetry:track")` uses an allowlist — adding new events
-  requires updating the `allowed` Set.
-- `firstrun:markComplete` atomically closes the wizard and opens the
-  capsule. The order is: saveConfig → create capsule window → re-register
-  hotkey → close old wizard. Don't flip that order.
+- Boot decision: `if (!initialCfg.firstRunComplete) wizard else capsule`. Tray
+  and hotkey register in BOTH branches (wizard needs the hotkey on screen 4).
+- `ipcMain.handle("telemetry:track")` uses an allowlist — add new renderer-
+  originated events to the `allowed` Set.
+- `firstrun:markComplete` order is load-bearing: saveConfig → create capsule
+  window → re-register hotkey → close old wizard. Don't flip.
+- `before-quit` calls `telemetry.shutdown()` with `e.preventDefault()` to give
+  the final flush time before `app.exit(0)`. Don't remove the preventDefault.
 
 ### `src/main/preload.ts` (74 lines)
 
-**Description**: `contextBridge.exposeInMainWorld` for both renderer
-windows. Exposes `window.meetelFlow` (main capsule API) and
-`window.meetelFirstRun` (wizard API) as separate namespaces so they can't
-collide. Same preload file is loaded into both windows — both globals
-exist in both windows, wizard uses `meetelFlow.transcribe` for the
-in-wizard dictation demo.
+`contextBridge.exposeInMainWorld` for both renderer windows. Exposes
+`window.meetelFlow` (capsule API) and `window.meetelFirstRun` (wizard API) as
+separate namespaces. Same preload runs on both windows — the wizard gets
+`meetelFlow.transcribe` access for its in-window dictation demo.
 
-**Key exports**: none (contextBridge is a side effect).
-
-**Gotchas**: any new IPC channel must be added here AND in the main
-process handler. The renderer cannot invoke channels that don't exist on
-the preload. Types are enforced in the renderer side (`renderer.ts` has
-a `MeetelApi` type, `firstrun.ts` has `MeetelFirstRunAPI`) — keep them in
-sync manually.
+**Gotcha**: any new IPC channel must be added here AND to the main-side
+handler AND to the TypeScript API type (`MeetelApi` in `renderer.ts`,
+`MeetelFirstRunAPI` in `firstrun.ts`). Types are manually kept in sync.
 
 ### `src/main/stt.ts` (584 lines)
 
-**Description**: The STT engine. Implements the Groq Whisper HTTPS client
-(raw multipart body assembly via `Buffer.concat`, no `form-data`
-dependency), the whisper.cpp local fallback (`execFile`), the
-hallucination filter with per-segment quality metrics, the regex cleanup,
-the bilingual voice-command mapping, and the LLM polish chain (Groq Llama
-3.3 70B → Gemini 2.0 Flash → raw text). Also maintains `lastTranscript`
-session memory for prompt continuity.
+The STT engine: Groq Whisper HTTPS client (raw multipart body assembled by
+hand, no `form-data` dep), `whisper.cpp` local fallback (`execFile`),
+per-segment hallucination filter, regex cleanup, bilingual voice-command
+mapping, LLM polish chain (Groq Llama 3.3 70B → Gemini 2.0 Flash → raw text).
+Maintains `lastTranscript` session memory.
 
-**Key exports**: `transcribe(config, audioBase64, mimeType, durationSeconds, wavBase64)`
+**Key export**: `transcribe(config, audioBase64, mimeType, durationSeconds, wavBase64)`
 
 **Gotchas**:
-- The Groq multipart body is assembled by hand. Order matters: fields must
-  come BEFORE the file for Groq's parser. Adding a new field? Append it
-  before the closing boundary.
-- The `prompt` parameter is load-bearing. Removing it drops transcription
-  quality on proper nouns (`DASH`, `TypeScript`) and punctuation style.
-  Don't strip it.
-- `temperature: 0` is correct. Whisper auto-adjusts on unclear audio when
-  temp is 0; higher values make it hallucinate more.
-- `groqPolish()` returns `""` on rate limit / timeout / empty — `llmPolish()`
-  falls through to Gemini on empty string. Do NOT throw on Groq polish
-  failure; fallback is the whole point.
-- `filterHallucinations` runs BEFORE `regexCleanup` because it relies on
-  the raw segments from the Groq response. Don't reorder.
-- `fixFrench()` exists but is currently unused in the main path — LLM
-  polish handles accents better. Kept for future offline-only mode.
-- Writes to `~/.meetel-flow/stt.log` bypass the main-process console
-  redirect — this is intentional so the STT path has its own log channel
-  for debugging without scrolling through event noise.
+- Groq multipart fields must come BEFORE the file for their parser. Append
+  new fields before the closing boundary.
+- The Whisper `prompt` parameter is load-bearing — removing it hurts proper
+  noun accuracy and punctuation style.
+- `temperature: 0` is correct; higher values make Whisper hallucinate more.
+- `groqPolish()` returns `""` on rate-limit/timeout/empty so `llmPolish()`
+  can fall through to Gemini. Do NOT throw there — fallback is the point.
+- `filterHallucinations` must run BEFORE `regexCleanup` because it needs the
+  raw segments from Groq's response.
+- `fixFrench()` is dead code in the main path (LLM polish handles accents).
+  Kept for a future offline-only mode.
+- Writes directly to `~/.meetel-flow/stt.log`, bypassing the main-process
+  console redirect. Intentional — STT gets its own log channel.
+- `--print-special false` is NOT a valid whisper-cli arg. See gotcha 7.
 
 ### `src/main/filters.ts` (487 lines)
 
-**Description**: Pure side-effect-free predicates for rejecting bad
-transcriptions before they hit the cursor. Per-language hallucination
-phrase dictionary (7 languages, ~200 entries), PCM16 RMS amplitude
-calculation with automatic WAV header skipping, duration floor check, and
-an orchestrator that runs all checks in cost order.
+Pure, side-effect-free predicates for rejecting bad transcriptions.
+Per-language hallucination phrase dictionary (7 languages, ~200 entries with
+inline origin comments), PCM16 RMS with WAV header auto-skip, duration floor,
+orchestrator that runs checks in cost order.
 
-**Key exports**:
-- `filterTranscriptionResult({text, language?, durationMs, audioBuffer?})`
-- `isKnownHallucination(text, language?)`
-- `isAudioTooQuiet(buffer, threshold=500)`
-- `isAudioTooShort(durationMs, minMs=300)`
-- `computeRmsPcm16(buffer)`
-- `normaliseForMatch(text)`
-- `HALLUCINATION_PHRASES` (exported for tests)
+**Key exports**: `filterTranscriptionResult`, `isKnownHallucination`,
+`isAudioTooQuiet`, `isAudioTooShort`, `computeRmsPcm16`, `normaliseForMatch`,
+`HALLUCINATION_PHRASES`.
 
 **Gotchas**:
-- The hallucination dictionary has inline comments for every entry
-  explaining its origin (CBC subtitles, Amara volunteer credits, ZDF,
-  etc.). Keep those — they document WHY the phrase is there so nobody
-  removes it thinking it's paranoid.
-- `computeRmsPcm16` auto-detects WAV headers by scanning for the `"data"`
-  chunk marker. Passing a non-PCM16 buffer (e.g. WebM) silently returns
-  garbage. The docstring says PCM16 LE only.
-- RMS threshold of 500 is conservative. Real speech at 6 inches reads
-  1500+. Loud use cases can drop to 300, whisper-to-mic use cases should
-  raise to 800.
-- Substring containment only triggers when
-  `transcription.length <= phrase.length * 2` to avoid rejecting real
-  speech that happens to quote "thanks for watching" as a fragment.
-  Don't remove that guard.
+- Every hallucination entry has a comment explaining its origin (CBC
+  subtitles, Amara credits, ZDF, etc.). Keep them so nobody deletes phrases
+  thinking they're paranoid.
+- `computeRmsPcm16` is PCM16 LE only. Passing WebM/Ogg returns garbage.
+- RMS threshold 500 is conservative (real speech at 6in reads 1500+).
+- Substring match only fires when `text.length ≤ phrase.length * 2` to avoid
+  rejecting real speech that quotes "thanks for watching" as a fragment.
 
 ### `src/main/inserter.ts` (70 lines)
 
-**Description**: OS-level cursor insertion. Clipboard-save + clipboard-set
-+ paste-script + clipboard-restore on Windows (PowerShell SendKeys `^v`)
-and macOS (osascript `keystroke "v" using command down`). Clipboard-only
-on Linux.
+OS-level cursor insertion. Clipboard-save + set + paste-script + restore on
+Windows (PowerShell `SendKeys '^v'`) and macOS (osascript `keystroke "v"
+using command down`). Clipboard-only on Linux.
 
-**Key exports**: `insertText(text, mode: "type" | "clipboard")`
+**Key export**: `insertText(text, mode: "type" | "clipboard")`
 
 **Gotchas**:
-- Do NOT use `SendKeys::SendWait(text)` directly — it strips Unicode.
-  Same for macOS `keystroke "text"`. Clipboard+paste is the only Unicode-safe
-  path. Documented in comments.
-- The 500ms `setTimeout` to restore previous clipboard is long enough
-  that the paste completes first. Dropping it below ~200ms causes
-  clipboard to restore before the target app reads it.
-- macOS path does NOT require Accessibility permission, only Automation.
-  Keep it that way — Accessibility requires a system-dialog click from
-  the user and many don't grant it.
-- On macOS, if Automation is blocked, the function throws with a
-  user-actionable message ("text left on clipboard, press Cmd+V") rather
-  than failing silently.
+- Never use `SendKeys::SendWait(text)` or `keystroke "text"` — both strip
+  Unicode. Clipboard+paste is the only Unicode-safe path.
+- The 500ms clipboard-restore delay is the minimum; below ~200ms the restore
+  races the paste.
+- Mac path does NOT require Accessibility — only Automation, which most apps
+  grant without a blocking dialog. Keep it that way.
+- If mac Automation is blocked the function throws a user-actionable
+  "text copied to clipboard, press Cmd+V" message instead of failing silently.
 
 ### `src/main/telemetry.ts` (515 lines)
 
-**Description**: Main-process singleton telemetry emitter. Initialises a
-Supabase client, derives a stable `device_id` (OS machine-id on Linux,
-persisted UUIDv4 elsewhere), maintains an in-memory event queue with an
-atomic-write disk mirror at `userData/telemetry-queue.json`, flushes on a
-30-second timer + on explicit `flush()` + on `shutdown()`, implements
-exponential backoff on failure (1s → 5min cap), caps runaway queues at
-10K events (drops oldest). Implements `identifyUser` as select-then-update.
+Main-process singleton telemetry emitter. Derives a stable `device_id`
+(Linux: hashed machine-id; else persisted UUIDv4). In-memory queue + atomic-
+write disk mirror at `userData/telemetry-queue.json`. Flushes every 30s / on
+explicit `flush()` / on `shutdown()`. Exponential backoff 1s → 5min cap.
+Queue cap 10K events, drops oldest. Implements `identifyUser` as
+select-then-update.
 
-**Key exports**:
-- `init(config)`, `track(event, payload)`, `identifyUser(email, name)`,
-  `flush()`, `shutdown()`, `IdentifyUserError`, `__internal` (for tests)
+**Key exports**: `init`, `track`, `identifyUser`, `flush`, `shutdown`,
+`IdentifyUserError`, `__internal`.
 
 **Gotchas**:
-- `init()` MUST be called after `app.whenReady()` — it reads
-  `app.getPath('userData')` to place the queue file.
-- `identifyUser` is NOT a plain upsert. See gotcha 4. Do not simplify.
-- Every `identifyUser` step logs to console (which main redirects to
-  `debug.log`). Don't add try/catch that swallows errors back to null —
-  the error messages are the debugging path.
-- `shutdown()` bypasses the backoff window to force one last flush on
-  `before-quit`. Main's `before-quit` handler calls this then
-  `app.exit(0)` — DO NOT remove the `e.preventDefault()` in main, it
-  gives the flush time to complete.
-- `flush()` uses `.insert(rows)` WITHOUT `.select()`. Changing that to
-  `.insert(rows).select()` will break anon writes (see gotcha 5).
-- The on-disk mirror uses atomic write (tmp file + rename) so a crash
-  mid-write can never corrupt the queue.
-- `MAX_QUEUE_SIZE = 10_000` — when exceeded, OLDEST events are dropped.
-  Freshest diagnostics win.
+- `init()` MUST run after `app.whenReady()` — needs `app.getPath('userData')`.
+- `identifyUser` is NOT an upsert. See gotcha 4 — do not simplify.
+- Every step logs to console (→ `debug.log`). Don't swallow errors back to
+  null; the error messages are the debugging path.
+- `flush()` uses `.insert()` without `.select()`. Adding `.select()` breaks
+  anon writes (gotcha 5).
+- Disk mirror uses tmp-file + rename so a crash mid-write can't corrupt the
+  queue.
 
 ### `src/main/events.ts` (109 lines)
 
-**Description**: TelemetryEvent discriminated union + helper types.
-Defines 10 event types with strict payload shapes (AppStart,
-FirstRunStart/Complete, MicPermissionResult, HotkeyFired,
-DictationSuccess/Failure, SettingsChanged, Error, SessionEnd) and the
-`QueuedTelemetryEvent` wrapper used for persistence.
+`TelemetryEvent` discriminated union + helper types. 10 event types with
+strict payload shapes; `QueuedTelemetryEvent` wrapper for persistence. No
+`any` types — `track<N>` enforces event/payload pairing at compile time.
 
-**Key exports**: `TelemetryEvent`, `TelemetryEventName`, `PayloadFor<N>`,
-`QueuedTelemetryEvent`, all individual payload interfaces.
-
-**Gotchas**:
-- No `any` types anywhere — that's intentional. Adding a new event
-  requires adding both the payload interface and a branch of the
-  discriminated union. `track<N>` is typed so the wrong payload for a
-  given event name is a compile error.
-- `DictationSuccessPayload.provider` is a `TelemetryProvider` union
-  that includes `"gemini"` — polishing via Gemini counts as a provider
-  for telemetry purposes even though STT was Groq.
+**Gotcha**: adding a new event requires both a new payload interface and a
+new branch of the union. `DictationSuccessPayload.provider` union includes
+`"gemini"` — polishing via Gemini counts as a provider for telemetry.
 
 ### `src/main/sync.ts` (67 lines)
 
-**Description**: Fire-and-forget `meetel_transcripts` insert after every
-successful dictation. Wrapped in an async IIFE so the public signature
-stays `void`. Reads `APP_VERSION` from `package.json` at module load.
+Fire-and-forget `meetel_transcripts` insert after every successful dictation.
+IIFE wrapper so the public signature stays `void`. Reads `APP_VERSION` from
+`package.json` at module load.
 
-**Key exports**: `pushTranscript(result, userId?)`
+**Key export**: `pushTranscript(result, userId?)`
 
-**Gotchas**:
-- If `userId` is undefined (user hasn't onboarded) the function is a no-op.
-  Local-only mode is a first-class state.
-- Uses `.insert()` WITHOUT `.select()` — same gotcha 5.
-- The trigger `trg_meetel_transcripts_first_dictation` fires on the insert
-  to stamp `first_dictation_at` on the user row. If you remove the trigger,
-  the admin cockpit's "time-to-first-dictation" metric stops working.
+**Gotchas**: no-op when `userId` is undefined (local-only mode). Uses
+`.insert()` without `.select()`. The
+`trg_meetel_transcripts_first_dictation` trigger fires on every insert — if
+you remove the trigger, the admin cockpit's time-to-first-dictation metric
+stops working.
 
 ### `src/main/config.ts` (61 lines)
 
-**Description**: `~/.meetel-flow/config.json` load/save + API-key loading.
-Reads Groq + Gemini keys from three sources in priority order:
-`process.env.MEETEL_GROQ_KEY`, then `~/.meetel-flow/.env` (parsed with
-plain regex), then empty. `loadConfig()` returns a merged object
-`defaults ⊕ disk ⊕ baked-keys` so the user can override the language/mode
-in the JSON file but the keys always come from env.
+`~/.meetel-flow/config.json` load/save + API-key resolution. Keys come from
+`process.env.MEETEL_GROQ_KEY` → `~/.meetel-flow/.env` (regex-parsed) →
+empty. `loadConfig()` returns `defaults ⊕ disk ⊕ baked-keys` — baked keys
+always win so updating the env file doesn't require clearing config.json.
 
-**Key exports**: `loadConfig()`, `saveConfig(partial)`
-
-**Gotchas**:
-- `saveConfig` reads+merges+writes — not atomic. Two simultaneous saves
-  race. In practice only main writes, so it's fine.
-- `.env` parsing is a quick regex, not a real dotenv parser. No support
-  for quoted values, line continuations, or comments. Keep it that way
-  unless there's a reason to pull in `dotenv`.
-- The baked Groq key overrides the disk-config Groq key. This is
-  intentional: if the env file is updated the user doesn't have to clear
-  their config.json to pick up the new key.
+**Gotchas**: `saveConfig` is read-merge-write, not atomic (fine in practice;
+only main writes). `.env` parsing is a regex, not real dotenv — no quoted
+values or comments.
 
 ### `src/main/usage.ts` (65 lines)
 
-**Description**: Monthly free-tier minutes cap. 100 minutes/month default,
-auto-reset on new month (compares `YYYY-MM`), persisted at
-`~/.meetel-flow/usage.json`. Tracked to 0.01 min precision.
+Monthly free-tier cap. 100 min/month default, auto-reset on `YYYY-MM`
+change, persisted at `~/.meetel-flow/usage.json`. 0.01 min precision.
 
-**Key exports**: `getUsage()`, `addUsage(seconds)`, `hasMinutesRemaining()`,
-`getRemainingMinutes()`
-
-**Gotchas**:
-- `addUsage` is called with `result.durationSeconds` from `stt.ts`, which
-  is the client-reported capture duration, NOT the Groq processing time.
-  A 1-second sentence counts 1 second against the cap.
-- Month comparison is string-based (`YYYY-MM`) which means timezone
-  matters. Using `new Date().getMonth()` → local time. Users travelling
-  across timezones might lose or gain minutes at month boundaries. Not
-  worth fixing until it bites someone.
+**Gotcha**: month comparison uses local time, so timezone-hopping users
+might lose/gain minutes at month boundaries. Not worth fixing yet.
 
 ### `src/main/updater.ts` (42 lines)
 
-**Description**: `electron-updater` bootstrap. Checks for updates on boot
-(packaged builds only), downloads in background, installs on quit.
-Silences `ERR_NAME_NOT_RESOLVED` / `ENOTFOUND` errors so dev builds don't
-spam logs.
+`electron-updater` bootstrap. Checks on boot (packaged builds only),
+downloads in background, installs on quit. Silences
+`ERR_NAME_NOT_RESOLVED`/`ENOTFOUND` so dev builds don't spam logs.
 
-**Key exports**: `setupAutoUpdates()`
-
-**Gotchas**:
-- Skipped when `!app.isPackaged` — `npm run dev` never checks updates.
-- `MEETEL_DISABLE_UPDATES=1` env var fully disables (for builds without
-  a live update feed).
-- The DNS-error silencer is per-error-message substring matching. If you
-  change it, make sure `"getaddrinfo"` still catches the common case.
-- Reads `latest.yml` from the `github` publish config in `package.json` —
-  tied to release flow, not `updates.meetel.com` (which doesn't exist yet).
+**Gotchas**: skipped when `!app.isPackaged`. `MEETEL_DISABLE_UPDATES=1`
+fully disables. DNS silencer uses substring matching — if you change it,
+make sure `"getaddrinfo"` still catches the common case.
 
 ### `src/main/ambiverse.ts` (137 lines)
 
-**Description**: Supabase Realtime broadcast-channel layer for live
-bilingual translation. Creates 4-digit room codes, joins rooms, receives
-transcripts from peers, translates them through Groq Llama, and fires
-a callback to the renderer. Uses the OLD-format JWT anon key (distinct
-from the new `sb_publishable_*` key used elsewhere) because the
-Realtime channel auth was configured with it first. TODO: unify.
-
-**Key exports**: `createRoom`, `joinRoom`, `leaveRoom`, `sendTranscript`,
-`isConnected`, `getRoom`, `translate`
+Supabase Realtime broadcast-channel layer for live bilingual translation.
+Creates 4-digit room codes, joins rooms, receives peer transcripts, runs
+them through `translate()` (Groq Llama), fires a callback to the renderer.
 
 **Gotchas**:
-- `channel.send({type: "broadcast", event: "transcript", payload})` is
-  fire-and-forget. Broadcast is best-effort, not guaranteed delivery.
-- The language-name map hardcodes 20 ISO codes to full names. Adding a
-  new language means adding to `langNames` AND making sure Groq Whisper
-  can actually detect it (it handles 100 natively).
-- `joinRoom` auto-leaves any existing room before joining a new one.
-- Room codes are 4 digits → 9000 possible rooms. Collision is unlikely in
-  practice but not impossible. No collision handling.
-- The anon key here (`eyJ...`) is NOT the same as the
-  `sb_publishable_9L0m_...` key in `sync.ts`/`index.ts`. Both are anon.
-  The JWT-format key works with Realtime; the publishable key works with
-  PostgREST. Historical artifact from before Supabase unified their key
-  story. Safe to leave, cleanup is low priority.
+- `channel.send(broadcast)` is best-effort, not guaranteed delivery.
+- Room codes are 4 digits → 9000 rooms, no collision handling.
+- The anon key here (`eyJ...` JWT format) is NOT the same as the
+  `sb_publishable_9L0m_...` key in `sync.ts`/`index.ts`. Both are anon —
+  JWT works with Realtime, publishable works with PostgREST. Historical
+  artifact; safe to leave.
 
 ### `src/main/types.ts` (31 lines)
 
-**Description**: Shared type aliases used across main and renderer.
-`FlowConfig`, `DictationResult`, `DictationState`, `ViewMode`, `PanelSide`.
+Shared type aliases: `FlowConfig`, `DictationResult`, `DictationState`,
+`ViewMode`, `PanelSide`.
 
-**Key exports**: the types above.
-
-**Gotchas**: `FlowConfig` is the canonical config shape. Adding a field
-requires: (1) default in `config.ts`, (2) wizard write path (if it's an
-onboarding value), (3) renderer read path, (4) telemetry diff in the
-`settings_changed` event.
+**Gotcha**: adding a field to `FlowConfig` requires: (1) default in
+`config.ts`, (2) wizard write path if onboarding-relevant, (3) renderer read
+path, (4) telemetry diff in the `settings_changed` event.
 
 ### `src/renderer/renderer.ts` (1337 lines)
 
-**Description**: Main capsule renderer. Three view modes (`panel` full-
-height sidebar, `compact` fixed box, `island` top-of-screen pill),
-hot-mic ring buffer + WAV encoding, transcript history in localStorage
-(capped at 50 entries), settings panel with mic picker + target mode +
-language toggle, in-capsule mic test (uses an `AnalyserNode` + RAF for
-a visual VU meter), upgrade overlay when the monthly cap hits zero,
-idle-fade with opacity + wake overlay, premium haptic sounds synthesised
-via `OscillatorNode` for every state transition, Ambiverse panel with
-join-room UX + TTS playback of incoming translations.
-
-**Key exports**: none (side-effect entrypoint, exports `{}` for module mode).
+Main capsule renderer. Three view modes (`panel`/`compact`/`island`), hot-
+mic ring buffer + WAV encoding, transcript history in localStorage (cap 50),
+settings panel with mic picker and in-capsule mic test (AnalyserNode + RAF
+VU meter), upgrade overlay when usage hits zero, idle-fade via
+`window:setOpacity` + wake overlay, synthesised haptic sounds per state
+transition (`OscillatorNode` + gain ramps, no sample library), Ambiverse
+panel with TTS playback of incoming translations.
 
 **Gotchas**:
 - `RING_BUFFER_SECONDS=30`, `PRE_ROLL_MS=250`, `POST_ROLL_MS=350`,
-  `PAD_START_MS=200`, `PAD_END_MS=800`, `SAMPLE_RATE=16000`, and the
-  12-minute cap are all tuned values. Don't change without re-testing
-  the whole hot path.
-- `actualSampleRate` is captured from `audioCtx.sampleRate` after the
-  AudioContext is created — don't use the `SAMPLE_RATE` constant for
-  anything downstream (ring buffer size, WAV header). Chromium on M1+
-  may have overridden it.
-- `ScriptProcessorNode` is deprecated in favour of `AudioWorklet` but
-  still works reliably in Electron 34. Migration is a future problem.
-- The idle-fade uses `window:setOpacity` IPC, not CSS — the window is
-  frameless + transparent and CSS opacity would also fade the content.
-- `window:setFocusable(false)` makes the window click-through: clicking
-  the capsule doesn't steal focus from the app you're dictating into.
-  We flip to focusable when settings opens so the user can click inputs.
+  `PAD_START_MS=200`, `PAD_END_MS=800`, 12-min cap — all tuned values, don't
+  change without re-testing the hot path.
+- Always use `actualSampleRate` (captured from `audioCtx.sampleRate`), never
+  the `SAMPLE_RATE` constant, for ring buffer sizing and WAV headers — M-series
+  Macs may have overridden the requested rate.
+- `ScriptProcessorNode` is deprecated but works reliably in Electron 34.
+  Migration to `AudioWorklet` is a future problem.
+- Idle fade uses `window:setOpacity` IPC, not CSS — the window is transparent
+  and CSS opacity would fade the content too.
+- `window:setFocusable(false)` makes the capsule click-through. Flipped to
+  focusable when settings opens so the user can click inputs.
 - `toggle()` has a 400ms debounce + a `toggling` re-entry flag.
-- `hasAudioInput` tracks whether the ring buffer saw any sample above
-  0.01 amplitude during the current recording session — this drives
-  the "No voice detected" warning at 1.5s.
-- `saveTranscript` caps at 50 entries. Long-press-to-delete gesture is
-  implemented inline in `setupTranscriptGestures`.
-- The `playSound` function synthesises waveform envelopes with
-  `OscillatorNode` + `GainNode` exponential ramps. Each sound is ~100–200ms.
-  Don't pull in a sample library, that's what makes it feel premium.
+- `hasAudioInput` drives the "No voice detected" warning at 1.5s; any sample
+  above 0.01 amplitude trips it.
 
 ### `src/renderer/firstrun.ts` (661 lines)
 
-**Description**: First-run wizard state machine. 6 screens with CSS
-transitions (`.is-active`, `.is-leaving`), progress dots, per-screen
-enter hooks. Identity form with email regex validation, mic permission
-probe with pending/granted/denied visual states, hotkey teach with
-in-window keydown listener + backup IPC path + 8s safety-valve button,
-in-wizard dictation demo that runs its OWN `getUserMedia` capture
-(doesn't share `renderer.ts`'s ring buffer) with WAV encoding and zero
-padding, 20s safety-valve skip link on screen 5, finish button that
-calls `markComplete` and closes.
-
-**Key exports**: none.
+First-run wizard state machine. 6 screens with CSS transitions, progress
+dots, per-screen enter hooks. Email regex validation, mic permission probe,
+hotkey teach with in-window `keydown` + IPC backup path + 8s safety-valve
+button, in-wizard dictation demo that runs its OWN `getUserMedia` capture
+(doesn't share the main capsule's ring buffer), 20s skip link on screen 5,
+finish button that calls `markComplete` and lets main close the wizard.
 
 **Gotchas**:
-- The wizard has its own capture pipeline (not the ring buffer) because
-  it runs in a separate BrowserWindow and doesn't have access to
-  `renderer.ts`'s state. Padding logic must stay in sync between the
-  two — same `PAD_START_MS=200`, `PAD_END_MS=800`.
-- `armHotkeyListener` and `armFirstDictation` MUST call
-  `armHotkeyTeach()` IPC on entry, MUST call `disarmHotkeyTeach()` IPC
-  on exit (or the manual next button). Forgetting to re-arm leaves the
+- Wizard has its own capture pipeline because it's a separate BrowserWindow.
+  Padding logic (`PAD_START_MS=200`, `PAD_END_MS=800`) must stay in sync with
+  `renderer.ts`.
+- `armHotkeyListener` / `armFirstDictation` MUST call `armHotkeyTeach()` on
+  entry and `disarmHotkeyTeach()` on exit. Forgetting to re-arm leaves the
   hotkey unregistered and the capsule can never trigger dictation.
-- `confirmHotkey` is idempotent (bails if `state.hotkeyDetected`).
-  There are TWO code paths that call it (in-window keydown AND the IPC
-  backup) so idempotency is required.
-- The "I pressed it" safety button on screen 4 appears at 8s, the skip
-  link on screen 5 appears at 20s. These exist because hotkey detection
-  has failed for real users before and the wizard must never trap them.
-- `markComplete` asks main to swap windows — main closes the wizard for
-  us, so the finish button shows "Opening..." and waits. If markComplete
-  throws, the button re-enables so the user can retry.
-- `meetelFlow` (the main-capsule API) is available to the wizard because
-  the same `preload.ts` runs on both windows. The wizard only uses
-  `meetelFlow.transcribe` for the dictation demo.
+- `confirmHotkey` is idempotent (two code paths can call it — in-window
+  keydown and the IPC backup).
+- Manual "I pressed it" button at 8s on screen 4, skip link at 20s on screen
+  5 — exist because hotkey detection has failed for real users before. The
+  wizard must never trap the user.
+- `meetelFlow` is available in the wizard because the same preload runs on
+  both windows. Wizard uses only `meetelFlow.transcribe`.
 
-### `src/renderer/index.html`, `styles.css`, `firstrun.html`, `firstrun.css`
+### `src/renderer/{index,firstrun}.{html,css}`
 
-**Description**: Static markup + CSS for both renderer windows. Copied
-as-is into `dist/renderer/` by `npm run copy:assets`. The capsule HTML
-includes all three view modes' DOM so `renderer.ts` can switch between
-them without reloading.
-
-**Gotchas**:
-- Any new DOM id or class used by `renderer.ts` / `firstrun.ts` must
-  also be added to the corresponding HTML file, AND the copy:assets
-  step will need to pick it up (already globs `.html` + `.css` files).
-- The capsule markup has `transparent` background and relies on a
-  frameless window — dropping `transparent: true` in `createWindow`
-  shows a black background.
+Static markup + CSS copied into `dist/renderer/` by `npm run copy:assets`.
+The capsule HTML contains all three view modes' DOM so `renderer.ts` can
+switch between them without reloading. Dropping `transparent: true` in
+`createWindow` shows a black background.
 
 ### `supabase/meetel-schema.sql`
 
-**Description**: Idempotent schema definition for the Supabase backend.
-Creates `meetel_users`, `meetel_events`, `meetel_transcripts` tables,
-their indexes, RLS policies, the `meetel_user_metrics` view, and the
-`meetel_stamp_first_dictation` trigger. Safe to re-run. Assumes
-`pgcrypto` extension (ships with Supabase by default).
+Idempotent schema: tables, indexes, RLS policies, the `meetel_user_metrics`
+view, the `meetel_stamp_first_dictation` trigger. Assumes `pgcrypto` (ships
+with Supabase). Safe to re-run.
 
 **Gotchas**:
-- Every policy is dropped-if-exists then recreated, so re-running the
-  script is safe. Keep that pattern for any new policy.
-- The view `meetel_user_metrics` is `CREATE OR REPLACE` but changing
-  its column list requires a `DROP VIEW` first (Postgres won't let you
-  add/remove columns via REPLACE).
-- The trigger function is `SECURITY DEFINER` with `SET search_path = public`
-  — this lets anon-role inserts into `meetel_transcripts` fire an UPDATE
-  on `meetel_users` they don't otherwise have permission to touch.
-  Don't remove `SECURITY DEFINER`.
-- Changing the `UNIQUE` constraints on `meetel_users.email` /
-  `device_id` requires updating `telemetry.ts::identifyUser` in lockstep.
+- Every policy is dropped-if-exists then recreated. Keep that pattern.
+- `CREATE OR REPLACE` on the view works for body changes but adding/removing
+  columns requires a prior `DROP VIEW`.
+- The trigger is `SECURITY DEFINER` with `SET search_path = public` so anon
+  inserts into `meetel_transcripts` can fire an UPDATE on `meetel_users`
+  they otherwise can't touch. Don't remove `SECURITY DEFINER`.
+- Changing `UNIQUE` constraints on `meetel_users.email` / `device_id`
+  requires updating `telemetry.ts::identifyUser` in lockstep.
 
 ### `supabase/PASTE_THIS_meetel.sql`
 
-**Description**: A condensed version of the schema designed for
-copy-pasting into the Supabase SQL editor when setting up a fresh
-project. Non-authoritative — the source of truth is `meetel-schema.sql`.
+Condensed copy-paste version of the schema for the Supabase SQL editor when
+spinning up a fresh project. Non-authoritative — source of truth is
+`meetel-schema.sql`.
 
 ---
 
