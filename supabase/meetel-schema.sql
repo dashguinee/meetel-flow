@@ -197,5 +197,70 @@ LEFT JOIN language_rank   l ON l.user_id = u.id AND l.rn = 1;
 -- Grant read on the view for anyone who can read the underlying tables.
 GRANT SELECT ON meetel_user_metrics TO authenticated, service_role;
 
+-- ── Transcripts ─────────────────────────────────────────────
+-- Cloud-side history of dictated text per user. FK cascades on user delete.
+-- Anon role inserts directly from the desktop app; service_role + authenticated
+-- read for the admin cockpit.
+CREATE TABLE IF NOT EXISTS meetel_transcripts (
+  id                BIGSERIAL PRIMARY KEY,
+  user_id           UUID NOT NULL REFERENCES meetel_users(id) ON DELETE CASCADE,
+  text              TEXT NOT NULL,
+  word_count        INTEGER NOT NULL DEFAULT 0,
+  duration_ms       INTEGER,
+  duration_seconds  NUMERIC(8,2),
+  language          TEXT,
+  provider          TEXT,
+  platform          TEXT,
+  app_version       TEXT,
+  created_at        TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE INDEX IF NOT EXISTS idx_meetel_transcripts_user_created
+  ON meetel_transcripts(user_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_meetel_transcripts_created
+  ON meetel_transcripts(created_at DESC);
+
+ALTER TABLE meetel_transcripts ENABLE ROW LEVEL SECURITY;
+
+DROP POLICY IF EXISTS meetel_transcripts_anon_insert ON meetel_transcripts;
+DROP POLICY IF EXISTS meetel_transcripts_service_all ON meetel_transcripts;
+DROP POLICY IF EXISTS meetel_transcripts_auth_read   ON meetel_transcripts;
+
+CREATE POLICY meetel_transcripts_anon_insert
+  ON meetel_transcripts FOR INSERT TO anon
+  WITH CHECK (true);
+
+CREATE POLICY meetel_transcripts_service_all
+  ON meetel_transcripts FOR ALL TO service_role
+  USING (true) WITH CHECK (true);
+
+CREATE POLICY meetel_transcripts_auth_read
+  ON meetel_transcripts FOR SELECT TO authenticated
+  USING (true);
+
+-- Trigger: stamp first_dictation_at on the user row the first time they
+-- successfully dictate. SECURITY DEFINER so anon clients can fire it without
+-- needing direct UPDATE permission on meetel_users.
+CREATE OR REPLACE FUNCTION meetel_stamp_first_dictation()
+RETURNS TRIGGER
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = public
+AS $$
+BEGIN
+  UPDATE meetel_users
+     SET first_dictation_at = now()
+   WHERE id = NEW.user_id
+     AND first_dictation_at IS NULL;
+  RETURN NEW;
+END;
+$$;
+
+DROP TRIGGER IF EXISTS trg_meetel_transcripts_first_dictation ON meetel_transcripts;
+CREATE TRIGGER trg_meetel_transcripts_first_dictation
+AFTER INSERT ON meetel_transcripts
+FOR EACH ROW
+EXECUTE FUNCTION meetel_stamp_first_dictation();
+
 -- ── Verify ──────────────────────────────────────────────────
 SELECT 'Meetel Flow telemetry schema ready.' AS status;
