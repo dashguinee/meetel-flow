@@ -109,20 +109,32 @@ const createTray = (): void => {
 
 /* ── Hotkeys ── */
 
+// Use literal "Control+Space" (not CommandOrControl) so it maps to the actual
+// Ctrl key on BOTH Windows AND macOS. This avoids the Cmd+Space conflict with
+// macOS Spotlight while keeping identical muscle memory across platforms.
+const HOTKEY = "Control+Space";
+
+const hotkeyToggle = (): void => {
+  telemetry.track("hotkey_fired", { hotkey: HOTKEY });
+  console.log("[hotkey] fired");
+  mainWindow?.webContents.send("hotkey:toggle");
+  // First-run wizard also listens so it can advance on the hotkey teach screen.
+  firstRunWindow?.webContents.send("firstrun:hotkeyFired");
+};
+
 const registerHotkeys = (): void => {
-  // Use literal "Control+Space" (not CommandOrControl) so it maps to the actual
-  // Ctrl key on BOTH Windows AND macOS. This avoids the Cmd+Space conflict with
-  // macOS Spotlight while keeping identical muscle memory across platforms.
-  const HOTKEY = "Control+Space";
-  const toggle = () => {
-    telemetry.track("hotkey_fired", { hotkey: HOTKEY });
-    mainWindow?.webContents.send("hotkey:toggle");
-    // First-run wizard also listens so it can advance on the hotkey teach screen.
-    firstRunWindow?.webContents.send("firstrun:hotkeyFired");
-  };
-  const ok = globalShortcut.register(HOTKEY, toggle);
+  if (globalShortcut.isRegistered(HOTKEY)) return;
+  const ok = globalShortcut.register(HOTKEY, hotkeyToggle);
+  console.log(`[hotkey] register ${HOTKEY} → ${ok ? "ok" : "FAILED"}`);
   if (!ok) {
-    console.warn(`[Meetel Flow] Failed to register ${HOTKEY} hotkey — another app may have claimed it`);
+    console.error(`[Meetel Flow] Failed to register ${HOTKEY} hotkey — another app may have claimed it`);
+  }
+};
+
+const unregisterHotkeys = (): void => {
+  if (globalShortcut.isRegistered(HOTKEY)) {
+    globalShortcut.unregister(HOTKEY);
+    console.log(`[hotkey] unregister ${HOTKEY}`);
   }
 };
 
@@ -254,8 +266,9 @@ app.whenReady().then(async () => {
   // IPC: First-run wizard
   ipcMain.handle("firstrun:createUser", async (_e, payload: { name: string; email: string }) => {
     try {
+      console.log(`[firstrun] createUser invoked email=${payload.email} name=${payload.name}`);
       const user = await telemetry.identifyUser(payload.email, payload.name || "");
-      if (!user) return { ok: false, error: "Could not create user" };
+      console.log(`[firstrun] createUser ok id=${user.id}`);
       saveConfig({
         userId: user.id,
         userEmail: payload.email,
@@ -264,7 +277,9 @@ app.whenReady().then(async () => {
       });
       return { ok: true, userId: user.id };
     } catch (err) {
-      return { ok: false, error: err instanceof Error ? err.message : "unknown" };
+      const msg = err instanceof Error ? err.message : "unknown error";
+      console.error(`[firstrun] createUser FAILED: ${msg}`);
+      return { ok: false, error: msg };
     }
   });
 
@@ -286,28 +301,20 @@ app.whenReady().then(async () => {
     }
   });
 
-  ipcMain.handle("firstrun:testHotkey", () =>
-    new Promise<{ detected: boolean }>((resolve) => {
-      const listener = () => {
-        firstRunWindow?.webContents.off("ipc-message", listener);
-        resolve({ detected: true });
-      };
-      // Resolve the first time the hotkey fires (the hotkey toggle closure
-      // already sends "firstrun:hotkeyFired" to the wizard window).
-      const timeout = setTimeout(() => resolve({ detected: false }), 120_000);
-      const bridge = () => {
-        clearTimeout(timeout);
-        resolve({ detected: true });
-      };
-      // Register a one-shot listener on ipcMain.
-      const channel = "firstrun:hotkeyFiredAck";
-      ipcMain.once(channel, bridge);
-      // Also resolve on a direct renderer-side ping if the wizard forwards it.
-      firstRunWindow?.webContents.once("did-finish-load", () => {
-        // no-op; just ensures the window is alive while we wait.
-      });
-    }),
-  );
+  // Wizard arm/disarm: while screen 4 is active we unregister the global
+  // shortcut so the in-window keydown listener can see the Ctrl+Space chord
+  // directly. Without this, RegisterHotKey on Windows eats the Space keydown
+  // before it ever reaches the wizard's renderer.
+  ipcMain.handle("firstrun:armHotkeyTeach", () => {
+    console.log("[firstrun] arm hotkey teach — unregistering global shortcut");
+    unregisterHotkeys();
+    return { ok: true };
+  });
+  ipcMain.handle("firstrun:disarmHotkeyTeach", () => {
+    console.log("[firstrun] disarm hotkey teach — re-registering global shortcut");
+    registerHotkeys();
+    return { ok: true };
+  });
 
   ipcMain.handle("firstrun:skipFirstDictation", () => {
     saveConfig({ firstDictationSkipped: true });

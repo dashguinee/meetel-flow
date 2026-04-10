@@ -299,48 +299,110 @@ export const track = <N extends TelemetryEventName>(
   persistQueueToDisk();
 };
 
+export class IdentifyUserError extends Error {
+  constructor(message: string, readonly cause?: unknown) {
+    super(message);
+    this.name = "IdentifyUserError";
+  }
+}
+
 export const identifyUser = async (
   email: string,
   name: string,
-): Promise<IdentifiedUser | null> => {
-  if (!state.initialised || !state.supabase || !state.deviceId) {
-    debugLog("identifyUser called before init or without supabase");
-    return null;
+): Promise<IdentifiedUser> => {
+  if (!state.initialised) {
+    throw new IdentifyUserError("Telemetry not initialised");
+  }
+  if (!state.supabase) {
+    throw new IdentifyUserError("Supabase client not configured (missing url/key)");
+  }
+  if (!state.deviceId) {
+    throw new IdentifyUserError("Device id not derived");
   }
 
   const platform = process.platform;
   const appVersion = state.config?.appVersion ?? "0.0.0";
 
+  // eslint-disable-next-line no-console
+  console.log(`[telemetry] identifyUser email=${email} device=${state.deviceId.slice(0, 8)}`);
+
+  // Both `email` AND `device_id` are UNIQUE in the schema, so a plain upsert
+  // with onConflict: "email" can still violate the device_id unique constraint
+  // (e.g. when the same device re-onboards with a different email). Resolve
+  // this with a select-then-update/insert pattern.
+  const sb = state.supabase;
+  const deviceId = state.deviceId;
+  const baseFields = {
+    email,
+    name,
+    device_id: deviceId,
+    platform,
+    app_version: appVersion,
+    last_active_at: new Date().toISOString(),
+  };
+
   try {
-    // Upsert on email. The DB schema guarantees email is unique.
-    const { data, error } = await state.supabase
+    // 1. Look for an existing row by device_id OR email.
+    const { data: existing, error: findErr } = await sb
       .from("meetel_users")
-      .upsert(
-        {
-          email,
-          name,
-          device_id: state.deviceId,
-          platform,
-          app_version: appVersion,
-          last_active_at: new Date().toISOString(),
-        },
-        { onConflict: "email" },
-      )
+      .select("id, email, name, device_id")
+      .or(`device_id.eq.${deviceId},email.eq.${email}`)
+      .limit(1)
+      .maybeSingle();
+
+    if (findErr) {
+      // eslint-disable-next-line no-console
+      console.error(`[telemetry] identifyUser find error: ${findErr.message} (code=${findErr.code ?? "?"})`);
+      throw new IdentifyUserError(findErr.message, findErr);
+    }
+
+    if (existing) {
+      // 2a. Update the existing row in place. Use the existing row's id so
+      // the unique constraints don't fight us.
+      const { data, error } = await sb
+        .from("meetel_users")
+        .update(baseFields)
+        .eq("id", existing.id)
+        .select("id, email, name, device_id")
+        .single();
+
+      if (error) {
+        // eslint-disable-next-line no-console
+        console.error(`[telemetry] identifyUser update error: ${error.message} (code=${error.code ?? "?"})`);
+        throw new IdentifyUserError(error.message, error);
+      }
+      if (!data) throw new IdentifyUserError("Update returned no row");
+
+      state.userId = data.id;
+      // eslint-disable-next-line no-console
+      console.log(`[telemetry] identifyUser updated id=${data.id}`);
+      return data as IdentifiedUser;
+    }
+
+    // 2b. No existing row — insert fresh.
+    const { data, error } = await sb
+      .from("meetel_users")
+      .insert(baseFields)
       .select("id, email, name, device_id")
       .single();
 
     if (error) {
-      debugLog("identifyUser upsert failed", error.message);
-      return null;
+      // eslint-disable-next-line no-console
+      console.error(`[telemetry] identifyUser insert error: ${error.message} (code=${error.code ?? "?"})`);
+      throw new IdentifyUserError(error.message, error);
     }
-    if (!data) return null;
+    if (!data) throw new IdentifyUserError("Insert returned no row");
 
     state.userId = data.id;
-    debugLog("identified user", data.id);
+    // eslint-disable-next-line no-console
+    console.log(`[telemetry] identifyUser inserted id=${data.id}`);
     return data as IdentifiedUser;
   } catch (err) {
-    debugLog("identifyUser threw", err);
-    return null;
+    if (err instanceof IdentifyUserError) throw err;
+    const msg = err instanceof Error ? err.message : "unknown identifyUser failure";
+    // eslint-disable-next-line no-console
+    console.error(`[telemetry] identifyUser threw: ${msg}`);
+    throw new IdentifyUserError(msg, err);
   }
 };
 

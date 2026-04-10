@@ -50,8 +50,10 @@ contextBridge.exposeInMainWorld("meetelFirstRun", {
   requestMicPermission: () =>
     ipcRenderer.invoke("firstrun:requestMicPermission"),
 
-  testHotkey: () =>
-    ipcRenderer.invoke("firstrun:testHotkey"),
+  // Temporarily releases the global Control+Space shortcut so the wizard's
+  // in-window keydown listener can detect the chord directly during screen 4.
+  armHotkeyTeach: () => ipcRenderer.invoke("firstrun:armHotkeyTeach"),
+  disarmHotkeyTeach: () => ipcRenderer.invoke("firstrun:disarmHotkeyTeach"),
 
   skipFirstDictation: () =>
     ipcRenderer.invoke("firstrun:skipFirstDictation"),
@@ -61,5 +63,12 @@ contextBridge.exposeInMainWorld("meetelFirstRun", {
 
   onDictationSuccess: (cb: () => void) => {
     ipcRenderer.on("firstrun:dictationSuccess", () => cb());
+  },
+
+  // Backup path: also fires when the global Control+Space hotkey is detected
+  // by the main process. Used when the wizard is NOT focused (so in-window
+  // keydown wouldn't catch it anyway).
+  onHotkeyFired: (cb: () => void) => {
+    ipcRenderer.on("firstrun:hotkeyFired", () => cb());
   },
 });

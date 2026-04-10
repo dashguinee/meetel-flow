@@ -33,8 +33,10 @@ interface HotkeyResult {
 interface MeetelFirstRunAPI {
   createUser(payload: { name: string; email: string }): Promise<CreateUserResult>;
   requestMicPermission(): Promise<MicPermissionResult>;
-  testHotkey(): Promise<HotkeyResult>;
+  armHotkeyTeach(): Promise<{ ok: boolean }>;
+  disarmHotkeyTeach(): Promise<{ ok: boolean }>;
   onDictationSuccess(cb: () => void): void;
+  onHotkeyFired(cb: () => void): void;
   skipFirstDictation(): Promise<void>;
   markComplete(): Promise<void>;
 }
@@ -44,6 +46,19 @@ declare global {
     meetelFirstRun: MeetelFirstRunAPI;
   }
 }
+
+// Local handle for the meetelFlow API (declared in renderer.ts). The wizard's
+// preload exposes the same global, so we cast to the subset we actually use.
+type MeetelFlowSubset = {
+  transcribe: (
+    audioBase64: string,
+    mimeType: string,
+    durationSeconds: number,
+    wavBase64?: string,
+  ) => Promise<{ text?: string; provider?: string; error?: string }>;
+};
+
+const meetelFlow: MeetelFlowSubset = (window as unknown as { meetelFlow: MeetelFlowSubset }).meetelFlow;
 
 // ── DOM helpers ──────────────────────────────────────────────────────────────
 
@@ -246,32 +261,36 @@ function armHotkeyListener(): void {
   const spaceKey = $<HTMLElement>("frKeySpace");
   const hint = $<HTMLElement>("frHotkeyHint");
   const nextBtn = $<HTMLButtonElement>("frHotkeyNextBtn");
+  const manualBtn = document.getElementById("frHotkeyManualBtn") as HTMLButtonElement | null;
 
-  // Subscribe to main-process hotkey fire (authoritative — works even if window
-  // is not focused).
-  window.meetelFirstRun
-    .testHotkey()
-    .then((result) => {
-      if (!result.detected) return;
-      confirmHotkey();
-    })
-    .catch(() => {
-      /* allow keyboard fallback below */
-    });
+  // Tell main to release the global Control+Space shortcut while this screen
+  // is open, so the chord lands on our in-window keydown listener instead of
+  // being eaten by the OS-level RegisterHotKey.
+  void window.meetelFirstRun.armHotkeyTeach();
 
-  // Fallback: in-window keyboard detection for visual feedback while we wait.
+  // In-window keyboard listener: detects the chord directly (works because we
+  // armed/released the global shortcut above).
   const onKeyDown = (e: KeyboardEvent): void => {
     if (e.code === "ControlLeft" || e.code === "ControlRight") ctrlKey.classList.add("is-down");
-    if (e.code === "Space") spaceKey.classList.add("is-down");
-    if ((e.ctrlKey || e.metaKey) && e.code === "Space") {
-      e.preventDefault();
-      confirmHotkey();
+    if (e.code === "Space") {
+      spaceKey.classList.add("is-down");
+      if (e.ctrlKey) {
+        e.preventDefault();
+        confirmHotkey();
+      }
     }
   };
   const onKeyUp = (e: KeyboardEvent): void => {
     if (e.code === "ControlLeft" || e.code === "ControlRight") ctrlKey.classList.remove("is-down");
     if (e.code === "Space") spaceKey.classList.remove("is-down");
   };
+
+  // Backup path: if the wizard window is NOT focused when the user presses
+  // the chord, the global shortcut may still be active (or get re-registered)
+  // and main will forward the IPC. Subscribe so we don't miss it.
+  window.meetelFirstRun.onHotkeyFired(() => {
+    confirmHotkey();
+  });
 
   function confirmHotkey(): void {
     if (state.hotkeyDetected) return;
@@ -282,40 +301,225 @@ function armHotkeyListener(): void {
     nextBtn.disabled = false;
     window.removeEventListener("keydown", onKeyDown);
     window.removeEventListener("keyup", onKeyUp);
+    // Re-arm the global shortcut now that we're done teaching it.
+    void window.meetelFirstRun.disarmHotkeyTeach();
   }
 
   window.addEventListener("keydown", onKeyDown);
   window.addEventListener("keyup", onKeyUp);
+
+  // Safety valve: after 8 seconds, surface a manual "I pressed it" button so
+  // the user is never stuck if hotkey detection fails for any reason.
+  if (manualBtn) {
+    window.setTimeout(() => {
+      if (!state.hotkeyDetected) manualBtn.hidden = false;
+    }, 8_000);
+    manualBtn.addEventListener("click", () => confirmHotkey());
+  }
 }
 
 // ── Screen 5: First dictation ───────────────────────────────────────────────
 
 let firstDictationArmed = false;
+let dictationRecording = false;
+let dictationStream: MediaStream | null = null;
+let dictationAudioCtx: AudioContext | null = null;
+let dictationScriptNode: ScriptProcessorNode | null = null;
+let dictationPcmChunks: Float32Array[] = [];
+let dictationActualSampleRate = 16000;
+let dictationStartedAt = 0;
+const DICTATION_SAMPLE_RATE = 16000;
+
+function setCapsuleLabel(text: string): void {
+  $<HTMLElement>("frCapsuleLabel").textContent = text;
+}
+
+function encodePcmToWavBytes(samples: Float32Array, sampleRate: number): Uint8Array {
+  const numSamples = samples.length;
+  const buffer = new ArrayBuffer(44 + numSamples * 2);
+  const view = new DataView(buffer);
+  const writeStr = (offset: number, str: string): void => {
+    for (let i = 0; i < str.length; i++) view.setUint8(offset + i, str.charCodeAt(i));
+  };
+  writeStr(0, "RIFF");
+  view.setUint32(4, 36 + numSamples * 2, true);
+  writeStr(8, "WAVE");
+  writeStr(12, "fmt ");
+  view.setUint32(16, 16, true);
+  view.setUint16(20, 1, true);
+  view.setUint16(22, 1, true);
+  view.setUint32(24, sampleRate, true);
+  view.setUint32(28, sampleRate * 2, true);
+  view.setUint16(32, 2, true);
+  view.setUint16(34, 16, true);
+  writeStr(36, "data");
+  view.setUint32(40, numSamples * 2, true);
+  for (let i = 0; i < numSamples; i++) {
+    const s = Math.max(-1, Math.min(1, samples[i]));
+    view.setInt16(44 + i * 2, s < 0 ? s * 0x8000 : s * 0x7FFF, true);
+  }
+  return new Uint8Array(buffer);
+}
+
+function bytesToBase64(bytes: Uint8Array): string {
+  let bin = "";
+  for (let i = 0; i < bytes.length; i += 0x8000) {
+    bin += String.fromCharCode(...Array.from(bytes.subarray(i, i + 0x8000)));
+  }
+  return btoa(bin);
+}
+
+async function startWizardRecording(): Promise<void> {
+  if (dictationRecording) return;
+  try {
+    dictationStream = await navigator.mediaDevices.getUserMedia({
+      audio: {
+        echoCancellation: true,
+        noiseSuppression: true,
+        channelCount: 1,
+        sampleRate: DICTATION_SAMPLE_RATE,
+      },
+    });
+  } catch (err) {
+    setCapsuleLabel("Mic blocked — check permissions");
+    // eslint-disable-next-line no-console
+    console.error("[firstrun] mic getUserMedia failed", err);
+    return;
+  }
+
+  dictationAudioCtx = new AudioContext({ sampleRate: DICTATION_SAMPLE_RATE });
+  dictationActualSampleRate = dictationAudioCtx.sampleRate;
+  const source = dictationAudioCtx.createMediaStreamSource(dictationStream);
+  const node = dictationAudioCtx.createScriptProcessor(4096, 1, 1);
+  dictationPcmChunks = [];
+  node.onaudioprocess = (e: AudioProcessingEvent): void => {
+    const input = e.inputBuffer.getChannelData(0);
+    dictationPcmChunks.push(new Float32Array(input));
+  };
+  source.connect(node);
+  node.connect(dictationAudioCtx.destination);
+  dictationScriptNode = node;
+  dictationRecording = true;
+  dictationStartedAt = Date.now();
+
+  const capsule = $<HTMLElement>("frCapsuleDemo");
+  capsule.classList.add("is-listening");
+  capsule.classList.remove("is-success");
+  setCapsuleLabel("Listening...");
+}
+
+async function stopAndTranscribeWizard(): Promise<void> {
+  if (!dictationRecording) return;
+  dictationRecording = false;
+
+  const capsule = $<HTMLElement>("frCapsuleDemo");
+  capsule.classList.remove("is-listening");
+  setCapsuleLabel("Transcribing...");
+
+  // Let trailing buffers flush.
+  await new Promise((r) => window.setTimeout(r, 500));
+
+  const durationSeconds = Math.max(1, Math.round((Date.now() - dictationStartedAt) / 1000));
+  dictationScriptNode?.disconnect();
+  dictationScriptNode = null;
+  dictationStream?.getTracks().forEach((t) => t.stop());
+  dictationStream = null;
+  void dictationAudioCtx?.close();
+  dictationAudioCtx = null;
+
+  const totalLength = dictationPcmChunks.reduce((sum, c) => sum + c.length, 0);
+  if (totalLength === 0) {
+    setCapsuleLabel("Listening for Ctrl+Space...");
+    return;
+  }
+  const allSamples = new Float32Array(totalLength);
+  let offset = 0;
+  for (const chunk of dictationPcmChunks) {
+    allSamples.set(chunk, offset);
+    offset += chunk.length;
+  }
+  dictationPcmChunks = [];
+
+  // Quick silence check.
+  let maxAmp = 0;
+  for (let i = 0; i < allSamples.length; i++) {
+    const a = Math.abs(allSamples[i]);
+    if (a > maxAmp) maxAmp = a;
+  }
+  if (maxAmp < 0.01) {
+    setCapsuleLabel("Too quiet — try again");
+    return;
+  }
+
+  const wavBytes = encodePcmToWavBytes(allSamples, dictationActualSampleRate);
+  const wavBase64 = bytesToBase64(wavBytes);
+
+  let result: { text?: string; provider?: string; error?: string };
+  try {
+    result = await meetelFlow.transcribe("", "audio/wav", durationSeconds, wavBase64);
+  } catch (err) {
+    setCapsuleLabel("Transcription failed — try again");
+    // eslint-disable-next-line no-console
+    console.error("[firstrun] transcribe threw", err);
+    return;
+  }
+
+  if (result.error || !result.text) {
+    setCapsuleLabel(result.error ?? "No speech detected");
+    return;
+  }
+
+  // Drop the result into the textarea (append if user dictates more than once).
+  const out = $<HTMLTextAreaElement>("frDictationOutput");
+  const prior = out.value.trim();
+  out.value = prior ? `${prior} ${result.text}` : result.text;
+  out.classList.add("is-done");
+  capsule.classList.add("is-success");
+  setCapsuleLabel("Got it");
+
+  if (!state.dictationDone) {
+    state.dictationDone = true;
+    const continueBtn = document.getElementById("frDictationContinueBtn") as HTMLButtonElement | null;
+    if (continueBtn) continueBtn.hidden = false;
+  }
+}
+
+async function toggleWizardDictation(): Promise<void> {
+  if (dictationRecording) {
+    await stopAndTranscribeWizard();
+  } else {
+    await startWizardRecording();
+  }
+}
 
 function armFirstDictation(): void {
   if (firstDictationArmed) return;
   firstDictationArmed = true;
 
-  const capsule = $<HTMLElement>("frCapsuleDemo");
-  const label = $<HTMLElement>("frCapsuleLabel");
   const skipLink = $<HTMLButtonElement>("frSkipDictation");
 
-  try {
-    window.meetelFirstRun.onDictationSuccess(() => {
-      if (state.dictationDone) return;
-      state.dictationDone = true;
-      capsule.classList.add("is-success");
-      label.textContent = "Got it. Nice work.";
-      window.setTimeout(() => goTo(6), 900);
-    });
-  } catch {
-    // If main didn't register, user will need Skip link.
-  }
+  // Release the global Control+Space shortcut while screen 5 is active so the
+  // chord lands on the wizard's in-window keydown listener (same approach as
+  // screen 4 — works regardless of whether globalShortcut.register succeeded).
+  void window.meetelFirstRun.armHotkeyTeach();
 
-  // Show "Skip for now" after 30s as a safety valve.
+  const onKeyDown = (e: KeyboardEvent): void => {
+    if (e.code === "Space" && e.ctrlKey) {
+      e.preventDefault();
+      void toggleWizardDictation();
+    }
+  };
+  window.addEventListener("keydown", onKeyDown);
+
+  // Backup path: if the global shortcut IS registered and fires, use it too.
+  window.meetelFirstRun.onHotkeyFired(() => {
+    void toggleWizardDictation();
+  });
+
+  // Show "Skip for now" after 20s as a safety valve.
   window.setTimeout(() => {
     if (!state.dictationDone) skipLink.hidden = false;
-  }, 30_000);
+  }, 20_000);
 
   skipLink.addEventListener("click", async () => {
     try {
@@ -323,6 +527,7 @@ function armFirstDictation(): void {
     } catch {
       /* continue anyway */
     }
+    void window.meetelFirstRun.disarmHotkeyTeach();
     goTo(6);
   });
 }
@@ -376,6 +581,11 @@ function bindActions(): void {
       case "next-from-hotkey":
         if (state.hotkeyDetected) goTo(5);
         break;
+      case "next-from-dictation":
+        // Re-arm the global shortcut now that the wizard is done teaching it.
+        void window.meetelFirstRun.disarmHotkeyTeach();
+        goTo(6);
+        break;
       case "finish":
         void finish();
         break;
@@ -415,6 +625,10 @@ function bindActions(): void {
     } else if (state.current === 4 && state.hotkeyDetected) {
       e.preventDefault();
       goTo(5);
+    } else if (state.current === 5 && state.dictationDone) {
+      e.preventDefault();
+      void window.meetelFirstRun.disarmHotkeyTeach();
+      goTo(6);
     } else if (state.current === 6) {
       e.preventDefault();
       void finish();

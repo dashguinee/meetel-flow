@@ -554,53 +554,6 @@ input {
 
 /* ── Screen 5: First dictation ── */
 
-.fr-instruction-card {
-  background: var(--fr-surface);
-  border: 1px solid var(--fr-border);
-  border-radius: var(--fr-radius);
-  padding: 16px 18px;
-}
-
-.fr-steps {
-  list-style: none;
-  counter-reset: frstep;
-  display: flex;
-  flex-direction: column;
-  gap: 10px;
-}
-
-.fr-steps li {
-  counter-increment: frstep;
-  position: relative;
-  padding-left: 30px;
-  font-size: 12.5px;
-  line-height: 1.55;
-  color: var(--fr-text-dim);
-}
-
-.fr-steps li::before {
-  content: counter(frstep);
-  position: absolute;
-  left: 0;
-  top: 0;
-  width: 20px;
-  height: 20px;
-  border-radius: 50%;
-  background: rgba(124, 58, 237, 0.12);
-  border: 1px solid rgba(124, 58, 237, 0.35);
-  color: var(--fr-accent);
-  font-size: 10px;
-  font-weight: 700;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-}
-
-.fr-steps strong {
-  color: var(--fr-text);
-  font-weight: 600;
-}
-
 .fr-capsule-demo {
   align-self: center;
   display: flex;
@@ -616,6 +569,12 @@ input {
   font-weight: 500;
   animation: frCapsuleBreath 3.5s ease-in-out infinite;
   transform-origin: center;
+}
+
+.fr-capsule-demo.is-listening {
+  border-color: rgba(255, 130, 40, 0.45);
+  background: rgba(255, 130, 40, 0.08);
+  animation: frCapsuleBreath 1.4s ease-in-out infinite;
 }
 
 .fr-capsule-demo.is-success {
@@ -640,6 +599,32 @@ input {
 
 .fr-capsule-mic {
   flex-shrink: 0;
+}
+
+.fr-dictation-output {
+  width: 100%;
+  background: var(--fr-surface);
+  border: 1px solid var(--fr-border);
+  border-radius: var(--fr-radius-sm);
+  color: var(--fr-text);
+  padding: 12px 14px;
+  font-size: 13px;
+  line-height: 1.55;
+  outline: none;
+  resize: none;
+  font-family: inherit;
+  transition: border-color 0.25s, background 0.25s;
+  user-select: text;
+  -webkit-user-select: text;
+}
+
+.fr-dictation-output::placeholder {
+  color: var(--fr-text-mute);
+}
+
+.fr-dictation-output.is-done {
+  border-color: rgba(34, 197, 94, 0.35);
+  background: rgba(34, 197, 94, 0.04);
 }
 
 /* ── Screen 6: Done ── */

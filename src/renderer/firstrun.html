@@ -129,6 +129,10 @@
 
           <p class="fr-hotkey-hint" id="frHotkeyHint">Waiting for you to press it...</p>
 
+          <button id="frHotkeyManualBtn" class="fr-linklike fr-linklike--centered" hidden>
+            Skip — I'll learn it later
+          </button>
+
           <div class="fr-nav">
             <button class="fr-secondary" data-action="back">Back</button>
             <button id="frHotkeyNextBtn" class="fr-cta" data-action="next-from-hotkey" disabled>Got it</button>
@@ -139,17 +143,8 @@
         <article class="fr-screen fr-screen--dictate" data-screen="5">
           <header class="fr-screen-head">
             <h2 class="fr-title">Try it now</h2>
-            <p class="fr-desc">Let's make sure everything works.</p>
+            <p class="fr-desc">Press <strong>Ctrl + Space</strong>, speak, then press it again to stop.</p>
           </header>
-
-          <div class="fr-instruction-card">
-            <ol class="fr-steps">
-              <li>Open any text field (Notepad, your browser, anywhere).</li>
-              <li>Press <strong>Ctrl + Space</strong>.</li>
-              <li>Say a sentence out loud.</li>
-              <li>Watch your words appear.</li>
-            </ol>
-          </div>
 
           <div class="fr-capsule-demo" id="frCapsuleDemo">
             <svg class="fr-capsule-mic" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
@@ -159,12 +154,16 @@
             <span class="fr-capsule-label" id="frCapsuleLabel">Listening for Ctrl+Space...</span>
           </div>
 
+          <textarea id="frDictationOutput" class="fr-dictation-output"
+            placeholder="Your words will appear here..." rows="3" readonly></textarea>
+
           <button id="frSkipDictation" class="fr-linklike fr-linklike--centered" hidden>
             Skip for now
           </button>
 
           <div class="fr-nav">
             <button class="fr-secondary" data-action="back">Back</button>
+            <button id="frDictationContinueBtn" class="fr-cta" data-action="next-from-dictation" hidden>Continue</button>
           </div>
         </article>
 

@@ -1,6 +1,6 @@
 {
   "name": "meetel-flow",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "description": "Meetel Flow desktop dictation shell",
   "main": "dist/main/index.js",
   "scripts": {
